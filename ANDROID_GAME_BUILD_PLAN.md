@@ -31,8 +31,9 @@ Already implemented and checked:
 - [x] Cached drawing styles, conditional hover redraw, 60 FPS cap, low-processor mode and normal Android screen timeout.
 - [x] Pause/focus save coalescing, backup repair, and Back cancelling a selected piece before saved exit from the current single-screen prototype.
 - [x] Native automated rules and scene checks; APK export and signature/archive/manifest checks.
+- [x] Phase 1 shell (0.2.0-dev): Home, How to Play, Pause, Settings, Result and confirmation dialogs; Back hierarchy; drag-to-place with tap placement retained; separate settings and profile saves; abandon confirmation; animations, sound effects and Reduced Motion. Device checks for this phase are still pending.
 
-Still to build: the full run, menu/navigation, Camp, draft/shop/Forge, equipped talismans, runes, special tiles, weather, Guardians, climbers, progression, tutorial, final art/audio, settings, localization and release workflow. A working starter is not evidence that those systems exist.
+Still to build: the full run, Camp, draft/shop/Forge, equipped talismans, runes, special tiles, weather, Guardians, climbers, progression, tutorial, final art/audio, settings, localization and release workflow. A working starter is not evidence that those systems exist.
 
 Real-device performance, battery, touch feel, lifecycle behavior and accessibility remain unverified until measured on Android hardware.
 
@@ -285,7 +286,7 @@ Acceptance: signed Android release artifact, store-side validation, physical-dev
 - **Android beta:** performance budgets and lifecycle/device checks measured; release signing/AAB and upgrade path verified.
 - **Release:** owner-approved store submission and tested rollout/update process.
 
-**Start next with Phase 1:** introduce screen routing and Pause/Settings, then implement a cancellable drag while retaining tap placement. Do not start with ads, a backend, additional platforms or all 48 talismans. First make one complete floor feel good on a real budget Android phone.
+**Phase 1 code is in place (0.2.0-dev); finish it on hardware:** check drag feel, safe areas, Back and lifecycle behavior on real phones, then add a text-size setting and a tested TalkBack layer. Do not start with ads, a backend, additional platforms or all 48 talismans. First make one complete floor feel good on a real budget Android phone.
 
 ## 17. Official implementation references
 

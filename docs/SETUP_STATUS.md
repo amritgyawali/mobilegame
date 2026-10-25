@@ -2,6 +2,19 @@
 
 Updated: 2026-10-25 (Asia/Katmandu). Sources: `C:\game`. Active project: `C:\game\SummitShards`. Tools: `D:\SummitShardsToolchain`.
 
+## 0.2.0-dev interaction shell (2026-10-25)
+
+Added Home, How to Play, Pause, Settings, Result and confirmation screens; the Back hierarchy; drag-to-place alongside tap placement; settings and lifetime statistics in separate checksummed saves; animations, synthesized sound effects, Reduced Motion and a 30 FPS battery saver. Touch targets are 96 reference pixels (48 dp). Version code 3, version `0.2.0-dev`.
+
+Verified in a Linux cloud container with the official Godot 4.7.2 Linux editor (`4.7.2.stable.official.ed1daf0bf`):
+
+- `tools/check_android_policy.py` passed: Android-only, ARM64, portrait, GL Compatibility, 60 FPS cap, low-processor mode, **no permissions**.
+- Project import passed. **1,156 rules assertions passed**, including preview-equals-commit on every move of 1,000 seeded rounds, statistics, loading saves written before statistics existed, profile/settings validation and the checksummed store.
+- **69 scene checks passed** through the real scene: tutorial on first start, dialogs blocking input, tap and drag placement, drag cancellation (off-board, app pause, late release), held board preview, Back at every level, Continue, New Trail confirmation, settings persistence, result recorded once across reloads, relaunch restoring trail/settings/profile, 48 dp targets on every screen, and bounded style/effect pools. No script errors or leak warnings.
+- Rendered every screen with Mesa llvmpipe through Xvfb (`tests/render_preview.gd`) and inspected the captures; the style cache stayed stable across 20 unchanged redraws.
+
+Not done in this session: the Android APK was **not rebuilt** (no Android SDK/templates in the container), and nothing was tested on a phone. Rebuild with `tools/Build-Android.ps1` and check drag feel, sound, safe areas, Back and lifecycle on hardware before calling Phase 1 complete.
+
 ## Android-only scope and implementation plan
 
 The shipping project targets **Android only**. The Windows export and unused Unity/C# prototype, .NET projects, obsolete installer scripts and old CI job have been removed from the repository. A local legacy backup is retained outside the workspace. The portable installer selects only Android export templates; earlier installed tools/artifacts remain outside Git. Windows editor previews continue to support Android development.

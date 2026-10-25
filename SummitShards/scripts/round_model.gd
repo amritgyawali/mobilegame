@@ -21,6 +21,11 @@ var trays_dealt: int = 0
 var rerolls: int = 1
 var streak: int = 0
 var status: int = PLAYING
+# Round statistics. Optional in saves so older version-1 snapshots still load.
+var moves: int = 0
+var lines_total: int = 0
+var best_move: int = 0
+var perfect_count: int = 0
 
 func _init(seed_value: int = 20261024, goal: int = 300, tray_limit: int = 8) -> void:
 	shapes = make_shapes()
@@ -155,9 +160,11 @@ static func clear_lines(tiles: Array) -> Dictionary:
 				pure.append(first)
 			for i in range(8):
 				marked[line * 8 + i if axis == 0 else i * 8 + line] = true
-	for index in marked:
+	var cells: Array = marked.keys()
+	cells.sort()
+	for index in cells:
 		tiles[index] = 0
-	return {"lines": lines, "removed": marked.size(), "pure": pure,
+	return {"lines": lines, "removed": marked.size(), "pure": pure, "cells": cells,
 		"perfect": lines > 0 and tiles.count(0) == 64}
 
 static func calculate_score(placed: int, clear: Dictionary, clear_streak: int, effects: Array = []) -> Dictionary:
@@ -182,18 +189,41 @@ func preview(piece: Dictionary, x: int, y: int) -> Dictionary:
 	for cell in shapes[int(piece.shape)].cells:
 		tiles[(y + cell.y) * 8 + x + cell.x] = int(piece.element)
 	var clear: Dictionary = clear_lines(tiles)
-	return calculate_score(shapes[int(piece.shape)].cells.size(), clear, streak + 1 if clear.lines > 0 else 0)
+	var result: Dictionary = calculate_score(shapes[int(piece.shape)].cells.size(), clear, streak + 1 if clear.lines > 0 else 0)
+	result.cleared = clear.cells
+	return result
+
+## Board indices a piece would occupy with its bounding-box origin at (x, y).
+func piece_cells(piece: Dictionary, x: int, y: int) -> Array:
+	var cells: Array = []
+	if piece.is_empty():
+		return cells
+	for cell in shapes[int(piece.shape)].cells:
+		cells.append((y + cell.y) * SIZE + x + cell.x)
+	return cells
 
 func try_place(slot: int, x: int, y: int) -> Dictionary:
 	if status != PLAYING or slot < 0 or slot >= 3 or not can_place(tray[slot], x, y):
 		return {"ok": false}
 	var piece: Dictionary = tray[slot]
-	for cell in shapes[int(piece.shape)].cells:
-		board[(y + cell.y) * 8 + x + cell.x] = int(piece.element)
+	var placed: Array = piece_cells(piece, x, y)
+	for index in placed:
+		board[index] = int(piece.element)
 	var clear: Dictionary = clear_lines(board)
 	streak = streak + 1 if clear.lines > 0 else 0
 	var result: Dictionary = calculate_score(shapes[int(piece.shape)].cells.size(), clear, streak)
 	score += int(result.points)
+	moves += 1
+	lines_total += int(clear.lines)
+	best_move = maxi(best_move, int(result.points))
+	if clear.perfect:
+		perfect_count += 1
+	result.placed = placed
+	result.cleared = clear.cells
+	result.pure = clear.pure.size()
+	result.perfect = clear.perfect
+	result.streak = streak
+	result.element = int(piece.element)
 	tray[slot] = {}
 	if score >= target:
 		status = WON
@@ -222,7 +252,10 @@ func snapshot() -> Dictionary:
 	return {"version": 1, "seed": seed_initial, "rng": rng_state, "board": board.duplicate(),
 		"tray": tray.duplicate(true), "bag": bag.duplicate(), "score": score, "target": target,
 		"max_trays": max_trays, "trays_dealt": trays_dealt, "rerolls": rerolls,
-		"streak": streak, "status": status}
+		"streak": streak, "status": status, "moves": moves, "lines_total": lines_total,
+		"best_move": best_move, "perfect_count": perfect_count}
+
+const OPTIONAL_STATS = ["moves", "lines_total", "best_move", "perfect_count"]
 
 static func integer_number(value: Variant) -> bool:
 	return value is int or (value is float and is_finite(value) and floor(value) == value and absf(value) <= 9007199254740991.0)
@@ -261,6 +294,11 @@ func restore_snapshot(data: Dictionary) -> bool:
 			return false
 	if int(data.status) == PLAYING and data.tray[0].is_empty() and data.tray[1].is_empty() and data.tray[2].is_empty():
 		return false
+	# Statistics were added after the first saves shipped. Missing keys default
+	# to zero; present keys must still be valid non-negative integers.
+	for key in OPTIONAL_STATS:
+		if data.has(key) and (not integer_number(data[key]) or int(data[key]) < 0):
+			return false
 	seed_initial = int(data.seed)
 	rng_state = int(data.rng)
 	# JSON numbers are floats. Normalize them so a restored snapshot has the
@@ -281,4 +319,8 @@ func restore_snapshot(data: Dictionary) -> bool:
 	rerolls = int(data.rerolls)
 	streak = int(data.streak)
 	status = int(data.status)
+	moves = int(data.get("moves", 0))
+	lines_total = int(data.get("lines_total", 0))
+	best_move = int(data.get("best_move", 0))
+	perfect_count = int(data.get("perfect_count", 0))
 	return true
