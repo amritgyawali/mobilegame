@@ -14,6 +14,9 @@ const Profile = preload("res://scripts/profile_model.gd")
 const Store = preload("res://scripts/persistence/json_store.gd")
 const Effects = preload("res://scripts/ui/effects.gd")
 const Sfx = preload("res://scripts/ui/sfx.gd")
+const Run = preload("res://scripts/run_model.gd")
+const Talismans = preload("res://scripts/content/talismans.gd")
+const Encounters = preload("res://scripts/content/encounters.gd")
 
 const INK = Color("18383d")
 const DEEP = Color("122d32")
@@ -24,11 +27,17 @@ const CREAM = Color("f4f0df")
 const MUTED = Color("a9b9af")
 const GOLD = Color("e7bf73")
 const CORAL = Color("ed9781")
-const COLORS = [Color("2a484a"), Color("7bbde2"), Color("e6e4cd"), Color("ed9781"), Color("85bca1"), Color("d8ba78")]
-const SYMBOLS = ["", "+", "o", "^", "~", "#"]
+# Tile colours: empty, Sky, Wind, Fire, Water, Earth, Stone, Cracked Stone.
+const COLORS = [Color("2a484a"), Color("7bbde2"), Color("e6e4cd"), Color("ed9781"), Color("85bca1"), Color("d8ba78"), Color("7d8a86"), Color("66716e")]
+const SYMBOLS = ["", "+", "o", "^", "~", "#", "", ""]
 
 const HOME = "home"
 const PLAY = "play"
+const CAMP = "camp"
+const QUICK = "quick"
+const RUN = "run"
+## Dialogs that wait for the clear animation before fading in.
+const DELAYED_DIALOGS = ["result", "round_won", "run_over"]
 const BOARD_RECT = Rect2(56, 330, 608, 608)
 const CELL = 76.0
 const TILE = 70.0
@@ -38,6 +47,10 @@ const HINT_RECT = Rect2(40, 944, 640, 50)
 const BUTTON_H = 96.0
 const NEW_RECT = Rect2(40, 1172, 310, BUTTON_H)
 const REROLL_RECT = Rect2(370, 1172, 310, BUTTON_H)
+const TALISMAN_BAR = Rect2(40, 1172, 470, BUTTON_H)
+const RUN_REROLL_RECT = Rect2(526, 1172, 154, BUTTON_H)
+const BASE_TALISMAN_ICONS = 5
+const CAMP_CHIPS_Y = 846.0
 const DRAG_LIFT = 130.0
 const DRAG_THRESHOLD = 14.0
 const TRAY_PITCH_MAX = 36.0
@@ -55,11 +68,11 @@ const SETTING_ROWS = [
 ]
 const HELP_LINES = [
 	"Drag a shard onto the board. Or tap it, then tap where its top-left corner goes.",
-	"Fill a whole row or column to clear it and climb.",
-	"Clear several lines at once to raise the multiplier.",
-	"A line of one symbol is a pure line: a big bonus.",
-	"Clear on back-to-back moves to build a streak. Empty the board for x3.",
-	"Reach the target altitude within 8 trays. You get one reroll per trail.",
+	"Fill a row or column to clear it. Score = Base x Mult.",
+	"More lines at once, pure lines (one symbol) and back-to-back clears raise Mult.",
+	"Reach each round's target within its trays. An Expedition is 8 floors of Trail, Ridge and Guardian rounds.",
+	"At Camp, take a free talisman, buy more, sell or reorder them. All +Base and +Mult count before any xMult.",
+	"Stone fills a cell. A clear cracks it; a second clear breaks it.",
 ]
 const STARS = [Vector2(70, 60), Vector2(160, 140), Vector2(250, 40), Vector2(330, 110), Vector2(420, 70),
 	Vector2(480, 180), Vector2(640, 50), Vector2(690, 150), Vector2(110, 230), Vector2(600, 260),
@@ -71,6 +84,15 @@ var profile: RefCounted
 var effects: RefCounted
 var sfx: Node
 var route: String = HOME
+var mode: String = QUICK
+## The Quick Trail round, kept while an expedition is being played.
+var quick_round: RefCounted
+var run: RefCounted
+var run_path: String = "user://run-v1.json"
+var last_run_summary: Dictionary = {}
+## Camp: selected held talisman slot, and a draft card waiting for a slot.
+var camp_selected: int = -1
+var camp_pending: int = -1
 var dialogs: Array = []
 var dialog_opened_at: float = 0.0
 var result_delay: float = 0.0
@@ -155,7 +177,9 @@ func _ready() -> void:
 	profile = Profile.new()
 	profile.from_dict(Store.read(profile_path))
 	round_state = Model.new(20261024)
+	quick_round = round_state
 	load_round()
+	load_run()
 	# A round that finished just before the app was closed is counted on the
 	# next launch; record_round ignores rounds already counted.
 	record_if_finished()
@@ -344,7 +368,7 @@ func _exit_tree() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
-		save_round()
+		save_active()
 		get_tree().quit()
 	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		handle_back()
@@ -352,7 +376,7 @@ func _notification(what: int) -> void:
 		return
 	elif what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		cancel_gesture()
-		save_round()
+		save_active()
 		if what == NOTIFICATION_APPLICATION_PAUSED and route == PLAY and dialogs.is_empty() and round_state.status == Model.PLAYING:
 			open_dialog("pause")
 		refresh_view()
@@ -377,9 +401,19 @@ func handle_back() -> void:
 		hover_cell = Vector2i(-1, -1)
 		reset_notice()
 	elif not dialogs.is_empty():
+		# Dialogs that lead somewhere continue there instead of stranding the
+		# player on a finished board.
+		var forward: Dictionary = {"intro": "begin", "round_won": "to_camp", "run_over": "home"}
+		if forward.has(dialogs.back()):
+			if dialog_ready():
+				activate(forward[dialogs.back()])
+			return
 		close_dialog()
-	elif route == PLAY:
-		save_round()
+	elif route == CAMP and (camp_selected >= 0 or camp_pending >= 0):
+		camp_selected = -1
+		camp_pending = -1
+	elif route == PLAY or route == CAMP:
+		save_active()
 		open_dialog("pause")
 	else:
 		open_dialog("confirm_exit")
@@ -435,7 +469,7 @@ func open_dialog(id: String) -> void:
 	dialogs.append(id)
 	dialog_opened_at = effects.time
 	result_delay = 0.0
-	if id == "result" and not settings.get_value("reduced_motion"):
+	if DELAYED_DIALOGS.has(id) and not settings.get_value("reduced_motion"):
 		result_delay = 0.8
 	overlay_layer.queue_redraw()
 	play_dialog_entrance()
@@ -456,7 +490,7 @@ func go_home() -> void:
 	selected = -1
 	dialogs.clear()
 	close_dialog()
-	save_round()
+	save_active()
 	route = HOME
 	play_screen_transition()
 	refresh_view()
@@ -467,20 +501,109 @@ func enter_play() -> void:
 		play_screen_transition()
 	reset_notice()
 	set_end_notice()
+	show_tutorial_once()
+
+## Opens How to Play the first time any game starts, on top of everything.
+func show_tutorial_once() -> void:
 	if not profile.seen_tutorial:
 		profile.seen_tutorial = true
 		save_profile()
 		open_dialog("help")
 
+## A Quick Trail with progress on it.
 func can_continue() -> bool:
-	return round_state.status == Model.PLAYING and (round_state.moves > 0 or round_state.rerolls == 0)
+	return quick_round.status == Model.PLAYING and (quick_round.moves > 0 or quick_round.rerolls == 0)
 
-func start_new_round() -> void:
-	cancel_gesture()
+func next_seed() -> int:
 	var seed_value: int = fixed_seed if fixed_seed >= 0 else int(Time.get_unix_time_from_system()) ^ Time.get_ticks_msec()
 	if fixed_seed >= 0:
 		fixed_seed += 1
-	round_state = Model.new(seed_value)
+	return seed_value
+
+## Switches to Quick Trail, keeping any expedition saved for later.
+func enter_quick() -> void:
+	if mode == RUN:
+		save_run()
+	mode = QUICK
+	round_state = quick_round
+	display_score = round_state.score
+	effects.clear_all()
+	refresh_derived()
+	if round_state.status != Model.PLAYING:
+		start_new_round()
+	enter_play()
+
+## Starts a fresh expedition at Floor 1.
+func start_run() -> void:
+	cancel_gesture()
+	if mode == QUICK:
+		save_round()
+	run = Run.new(next_seed())
+	last_run_summary = {}
+	mode = RUN
+	dialogs.clear()
+	close_dialog()
+	sync_run_round()
+	save_run()
+	route = PLAY
+	play_screen_transition()
+	open_dialog("intro")
+	show_tutorial_once()
+
+## Resumes the saved expedition where it stopped.
+func enter_run() -> void:
+	if run == null:
+		return
+	if mode == QUICK:
+		save_round()
+	mode = RUN
+	dialogs.clear()
+	close_dialog()
+	sync_run_round()
+	if run.phase == Run.CAMP:
+		route = CAMP
+		play_screen_transition()
+	else:
+		route = PLAY
+		play_screen_transition()
+		if run.phase == Run.INTRO:
+			open_dialog("intro")
+		show_tutorial_once()
+
+## Points the board at the expedition's current round.
+func sync_run_round() -> void:
+	round_state = run.round
+	selected = -1
+	hover_cell = Vector2i(-1, -1)
+	effects.clear_all()
+	display_score = round_state.score
+	_slot_pieces = [{}, {}, {}]
+	refresh_derived()
+	reset_notice()
+	set_end_notice()
+
+func record_run() -> void:
+	if run == null:
+		return
+	var summary: Dictionary = profile.record_run(run.run_seed, run.phase == Run.WON, run.floor_reached(), run.rounds_won)
+	if not summary.is_empty():
+		last_run_summary = summary
+		save_profile()
+
+## Ending an expedition early counts as a played, lost run once it has begun.
+func abandon_run() -> void:
+	if run_active() and (run.rounds_won > 0 or run.round.moves > 0):
+		run.phase = Run.LOST
+		record_run()
+	if run != null:
+		run.phase = Run.LOST
+		save_run()
+
+## Starts a new Quick Trail round.
+func start_new_round() -> void:
+	cancel_gesture()
+	quick_round = Model.new(next_seed())
+	round_state = quick_round
 	selected = -1
 	hover_cell = Vector2i(-1, -1)
 	effects.clear_all()
@@ -506,14 +629,58 @@ func activate(id: String) -> void:
 		save_settings()
 		refresh_view()
 		return
+	if route == CAMP and dialogs.is_empty() and camp_action(id):
+		save_run()
+		refresh_view()
+		return
 	match id:
+		"quick":
+			enter_quick()
+		"run_new":
+			if run_active() and (run.rounds_won > 0 or run.round.moves > 0):
+				open_dialog("confirm_run_new")
+			else:
+				start_run()
+		"confirm_run_new", "run_again":
+			abandon_run()
+			start_run()
+		"run_continue":
+			enter_run()
+		"begin":
+			if run != null and run.begin():
+				save_run()
+			close_dialog()
+			reset_notice()
+		"talismans":
+			open_dialog("talismans")
+		"to_camp":
+			dialogs.clear()
+			close_dialog()
+			camp_selected = -1
+			camp_pending = -1
+			route = CAMP
+			play_screen_transition()
+		"confirm_abandon":
+			abandon_run()
+			last_run_summary = {}
+			go_home()
 		"continue":
 			enter_play()
 		"start":
 			if round_state.status != Model.PLAYING:
 				start_new_round()
 			enter_play()
-		"new", "restart":
+		"restart":
+			if mode == RUN:
+				open_dialog("confirm_abandon")
+			elif round_state.status == Model.PLAYING and round_state.moves > 0:
+				open_dialog("confirm_new")
+			else:
+				dialogs.clear()
+				close_dialog()
+				start_new_round()
+				enter_play()
+		"new":
 			if round_state.status == Model.PLAYING and round_state.moves > 0:
 				open_dialog("confirm_new")
 			else:
@@ -530,7 +697,7 @@ func activate(id: String) -> void:
 		"pause":
 			cancel_gesture()
 			selected = -1
-			save_round()
+			save_active()
 			open_dialog("pause")
 		"reroll":
 			reroll()
@@ -547,7 +714,7 @@ func activate(id: String) -> void:
 		"home":
 			go_home()
 		"confirm_exit":
-			save_round()
+			save_active()
 			get_tree().quit()
 		"resume", "cancel", "done":
 			close_dialog()
@@ -564,7 +731,7 @@ func commit_place(slot: int, cell: Vector2i) -> bool:
 		return false
 	selected = -1
 	hover_cell = Vector2i(-1, -1)
-	save_round()
+	save_active()
 	refresh_derived()
 	play_move_feedback(result, before)
 	after_command()
@@ -577,7 +744,7 @@ func reroll() -> void:
 		cancel_gesture()
 		notice = "Fresh shards. Make them count."
 		sfx.play("select", 0.8)
-		save_round()
+		save_active()
 		refresh_derived()
 		after_command()
 		refresh_view()
@@ -585,6 +752,9 @@ func reroll() -> void:
 ## Runs after every committed command: records a finished round exactly once
 ## and shows its result.
 func after_command() -> void:
+	if mode == RUN:
+		after_run_command()
+		return
 	if round_state.status == Model.PLAYING:
 		return
 	set_end_notice()
@@ -593,11 +763,36 @@ func after_command() -> void:
 	if dialogs.is_empty() or dialogs.back() != "result":
 		open_dialog("result")
 
+## Expedition rounds settle through the run: Camp, the next round after a
+## Firebird save, or the end of the run.
+func after_run_command() -> void:
+	match run.after_round_command():
+		"round_won":
+			sfx.play("win")
+			set_end_notice()
+			open_dialog("round_won")
+		"summit":
+			sfx.play("win")
+			record_run()
+			open_dialog("run_over")
+		"firebird":
+			sfx.play("big", 0.8)
+			sync_run_round()
+			notice = "The Firebird Feather burns away. Try the round again."
+			open_dialog("intro")
+		"run_lost":
+			sfx.play("lose")
+			set_end_notice()
+			record_run()
+			open_dialog("run_over")
+	save_run()
+
 func record_if_finished() -> void:
-	if round_state.status == Model.PLAYING:
+	var quick = quick_round if quick_round != null else round_state
+	if quick.status == Model.PLAYING:
 		return
-	var summary: Dictionary = profile.record_round(round_state.seed_initial, round_state.status == Model.WON,
-		round_state.score, round_state.lines_total, round_state.perfect_count, round_state.best_move)
+	var summary: Dictionary = profile.record_round(quick.seed_initial, quick.status == Model.WON,
+		quick.score, quick.lines_total, quick.perfect_count, quick.best_move)
 	if not summary.is_empty():
 		last_summary = summary
 		save_profile()
@@ -640,13 +835,98 @@ func play_move_feedback(result: Dictionary, before: Array) -> void:
 		sfx.play("clear", 1.0 + 0.06 * mini(6, int(result.streak)))
 	else:
 		sfx.play("place")
+	# Show why: Base x Mult, and light up the talismans that changed it.
+	notice = "+%s  =  %s x %s" % [fmt_int(result.points), fmt_int(result.base), fmt_mult(result.mult)]
 	if lines > 0:
-		notice = "+%d altitude  /  %d %s" % [result.points, lines, "line" if lines == 1 else "lines"]
-	else:
-		notice = "+%d altitude" % result.points
+		notice += "  /  %d %s" % [lines, "line" if lines == 1 else "lines"]
+	if int(result.get("coins_found", 0)) > 0:
+		notice += "  /  +%d coin" % result.coins_found
+	if mode == RUN:
+		var triggered: Array = result.get("triggered", [])
+		for slot in range(round_state.talismans.size()):
+			var id: String = round_state.talismans[slot]
+			if id == "mirror_lake" and slot + 1 < round_state.talismans.size():
+				id = round_state.talismans[slot + 1]
+			if triggered.has(id) and slot != round_state.disabled_slot():
+				effects.add_flash(slot)
 	_fx_dirty = true
 	fx_layer.queue_redraw()
 	start_animation()
+
+## Camp buttons. Returns true when `id` was a Camp action.
+func camp_action(id: String) -> bool:
+	if run == null or run.phase != Run.CAMP:
+		return false
+	if id.begins_with("draft:"):
+		var index: int = int(id.substr(6))
+		if run.has_room():
+			if run.take_draft(index):
+				sfx.play("select")
+				camp_pending = -1
+		else:
+			# Full: the next tapped slot is sold to make room.
+			camp_pending = index if camp_pending != index else -1
+			camp_selected = -1
+		return true
+	if id.begins_with("slot:"):
+		var slot: int = int(id.substr(5))
+		if camp_pending >= 0 and run.draft_open:
+			if run.take_draft(camp_pending, slot):
+				sfx.play("select")
+			camp_pending = -1
+			camp_selected = -1
+		else:
+			camp_selected = slot if camp_selected != slot else -1
+		return true
+	if id.begins_with("buy:"):
+		if run.buy(int(id.substr(4))):
+			sfx.play("select")
+		else:
+			sfx.play("invalid")
+		return true
+	match id:
+		"skip":
+			run.skip_draft()
+			camp_pending = -1
+		"reroll_shop":
+			if not run.reroll_shop():
+				sfx.play("invalid")
+		"sell":
+			if camp_selected >= 0 and run.sell(camp_selected):
+				camp_selected = -1
+		"move_left":
+			if run.move(camp_selected, -1):
+				camp_selected -= 1
+		"move_right":
+			if run.move(camp_selected, 1):
+				camp_selected += 1
+		"leave":
+			if run.leave_camp():
+				camp_selected = -1
+				camp_pending = -1
+				sync_run_round()
+				route = PLAY
+				play_screen_transition()
+				open_dialog("intro")
+		_:
+			return false
+	return true
+
+## "1,234" for whole numbers.
+static func fmt_int(value: int) -> String:
+	var digits: String = str(absi(value))
+	var out: String = ""
+	while digits.length() > 3:
+		out = "," + digits.substr(digits.length() - 3) + out
+		digits = digits.substr(0, digits.length() - 3)
+	return ("-" if value < 0 else "") + digits + out
+
+## A multiplier with at most two decimals and no trailing zeros.
+static func fmt_mult(value: float) -> String:
+	var text: String = "%.2f" % value
+	while text.ends_with("0"):
+		text = text.substr(0, text.length() - 1)
+	return text.trim_suffix(".")
 
 ## Recomputes which tray pieces still fit, and the blocked-tray hint.
 func refresh_derived() -> void:
@@ -891,22 +1171,84 @@ func current_buttons() -> Array:
 func screen_buttons() -> Array:
 	if route == HOME:
 		var list: Array = []
-		if can_continue():
-			list.append(make_button("continue", Rect2(80, 830, 560, 112), "CONTINUE TRAIL", "primary",
-				{"sub": "Altitude %d / %d  -  Tray %d / %d" % [round_state.score, round_state.target, round_state.trays_dealt, round_state.max_trays]}))
-			list.append(make_button("new", Rect2(80, 958, 560, BUTTON_H), "NEW TRAIL", "secondary"))
+		if run_active():
+			list.append(make_button("run_continue", Rect2(80, 830, 560, 112), "CONTINUE EXPEDITION", "primary",
+				{"sub": run_progress_text()}))
+			list.append(make_button("run_new", Rect2(80, 958, 272, BUTTON_H), "NEW RUN", "secondary"))
+			list.append(make_button("quick", Rect2(368, 958, 272, BUTTON_H), "QUICK TRAIL"))
 		else:
-			list.append(make_button("start", Rect2(80, 830, 560, 112), "START CLIMB", "primary"))
-		var row_y: float = 1070.0 if can_continue() else 958.0
-		list.append(make_button("help", Rect2(80, row_y, 272, BUTTON_H), "HOW TO PLAY"))
-		list.append(make_button("settings", Rect2(368, row_y, 272, BUTTON_H), "SETTINGS"))
+			list.append(make_button("run_new", Rect2(80, 830, 560, 112), "START EXPEDITION", "primary",
+				{"sub": "8 floors  -  talismans  -  Guardians"}))
+			list.append(make_button("quick", Rect2(80, 958, 560, BUTTON_H), "CONTINUE QUICK TRAIL" if can_continue() else "QUICK TRAIL"))
+		list.append(make_button("help", Rect2(80, 1070, 272, BUTTON_H), "HOW TO PLAY"))
+		list.append(make_button("settings", Rect2(368, 1070, 272, BUTTON_H), "SETTINGS"))
 		return list
+	if route == CAMP:
+		return camp_buttons()
 	var playing: bool = round_state.status == Model.PLAYING
+	if mode == RUN:
+		return [
+			make_button("pause", PAUSE_RECT, "", "icon"),
+			make_button("talismans", TALISMAN_BAR, "", "talisman_bar"),
+			make_button("reroll", RUN_REROLL_RECT, "REROLL %d" % round_state.rerolls, "secondary", {"enabled": playing and round_state.rerolls > 0}),
+		]
 	return [
 		make_button("pause", PAUSE_RECT, "", "icon"),
 		make_button("new", NEW_RECT, "NEW TRAIL", "primary"),
 		make_button("reroll", REROLL_RECT, "REROLL  %d" % round_state.rerolls, "secondary", {"enabled": playing and round_state.rerolls > 0}),
 	]
+
+func run_progress_text() -> String:
+	if run == null:
+		return ""
+	return "Floor %d %s  -  %s coins  -  %d talismans" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage],
+		fmt_int(run.coins), run.talismans.size()]
+
+## Where held talisman `slot` sits in a row of `count` chips across `area`.
+func chip_rect(area: Rect2, slot: int, count: int, max_size: float) -> Rect2:
+	var gap: float = 10.0
+	var width: float = minf(max_size, (area.size.x - gap * (count - 1)) / maxi(1, count))
+	return Rect2(area.position.x + slot * (width + gap), area.position.y, width, area.size.y)
+
+func talisman_icon_rect(slot: int) -> Rect2:
+	var count: int = maxi(BASE_TALISMAN_ICONS, round_state.talismans.size())
+	var area = Rect2(TALISMAN_BAR.position + Vector2(12, 16), Vector2(TALISMAN_BAR.size.x - 24, TALISMAN_BAR.size.y - 32))
+	var rect: Rect2 = chip_rect(area, slot, count, 76)
+	return Rect2(rect.position, Vector2(rect.size.x, area.size.y))
+
+func camp_buttons() -> Array:
+	var list: Array = [make_button("pause", PAUSE_RECT, "", "icon")]
+	if run == null:
+		return list
+	var held: int = run.talismans.size()
+	var chip_area = Rect2(40, CAMP_CHIPS_Y, 640, 112)
+	for slot in range(held):
+		list.append(make_button("slot:%d" % slot, chip_rect(chip_area, slot, run.slots(), 112), "", "chip",
+			{"talisman": run.talismans[slot], "selected": camp_selected == slot or camp_pending >= 0}))
+	if run.draft_open:
+		for i in range(run.draft.size()):
+			list.append(make_button("draft:%d" % i, Rect2(40, 210 + i * 204, 640, 190), "", "card",
+				{"talisman": run.draft[i], "selected": camp_pending == i, "tag": "FREE" if run.has_room() else "SWAP"}))
+		list.append(make_button("skip", Rect2(40, 1172, 640, BUTTON_H), "SKIP  +%d COINS" % Run.SKIP_COINS, "secondary"))
+		return list
+	list.append(make_button("reroll_shop", Rect2(480, 132, 200, BUTTON_H), "REROLL %d" % run.reroll_cost(), "secondary",
+		{"enabled": run.coins >= run.reroll_cost()}))
+	for i in range(run.shop.size()):
+		var offer: Dictionary = run.shop[i]
+		var cost: int = run.price(offer.id)
+		var tag: String = "SOLD" if offer.sold else ("FULL" if not run.has_room() else "%d" % cost)
+		list.append(make_button("buy:%d" % i, Rect2(40, 244 + i * 176, 640, 160), "", "offer",
+			{"talisman": offer.id, "tag": tag, "enabled": not offer.sold and run.has_room() and run.coins >= cost}))
+	if camp_selected >= 0 and camp_selected < held:
+		list.append(make_button("move_left", Rect2(40, 1060, 140, BUTTON_H), "<", "ghost", {"enabled": camp_selected > 0}))
+		list.append(make_button("move_right", Rect2(196, 1060, 140, BUTTON_H), ">", "ghost", {"enabled": camp_selected < held - 1}))
+		var id: String = run.talismans[camp_selected]
+		var can_sell: bool = id != "ninth_peak" or held - 1 <= run.slots() - 2
+		list.append(make_button("sell", Rect2(352, 1060, 328, BUTTON_H), "SELL  +%d" % Talismans.sell_price(id), "danger", {"enabled": can_sell}))
+	var next_stage: int = (run.stage + 1) % 3
+	var next_floor: int = run.floor_index + (1 if run.stage == Encounters.GUARDIAN else 0) + 1
+	list.append(make_button("leave", Rect2(40, 1172, 640, BUTTON_H), "CLIMB ON  -  FLOOR %d %s" % [next_floor, Encounters.STAGE_NAMES[next_stage].to_upper()], "primary"))
+	return list
 
 func dialog_card(id: String) -> Rect2:
 	match id:
@@ -915,9 +1257,15 @@ func dialog_card(id: String) -> Rect2:
 		"settings":
 			return Rect2(50, 200, 620, 880)
 		"help":
-			return Rect2(50, 130, 620, 1020)
-		"result":
+			return Rect2(50, 110, 620, 1060)
+		"result", "run_over":
 			return Rect2(70, 230, 580, 820)
+		"intro":
+			return Rect2(70, 250, 580, 760)
+		"round_won":
+			return Rect2(70, 280, 580, 700)
+		"talismans":
+			return Rect2(40, 120, 640, 1040)
 	return Rect2(90, 440, 540, 400)
 
 func dialog_buttons(id: String) -> Array:
@@ -928,7 +1276,7 @@ func dialog_buttons(id: String) -> Array:
 		"pause":
 			var list: Array = []
 			var entries = [["resume", "RESUME", "primary"], ["help", "HOW TO PLAY", "ghost"], ["settings", "SETTINGS", "ghost"],
-				["restart", "NEW TRAIL", "ghost"], ["home", "HOME", "ghost"]]
+				["restart", "ABANDON RUN" if mode == RUN else "NEW TRAIL", "ghost"], ["home", "HOME", "ghost"]]
 			for i in range(entries.size()):
 				list.append(make_button(entries[i][0], Rect2(x, card.position.y + 160 + i * 110, width, BUTTON_H), entries[i][1], entries[i][2]))
 			return list
@@ -947,7 +1295,18 @@ func dialog_buttons(id: String) -> Array:
 			var half: float = (width - 20) * 0.5
 			return [make_button("home", Rect2(x, card.end.y - 120, half, BUTTON_H), "HOME", "ghost"),
 				make_button("next", Rect2(x + half + 20, card.end.y - 120, half, BUTTON_H), "NEXT TRAIL", "primary")]
-	var confirm_label: String = {"confirm_new": "START NEW", "confirm_exit": "EXIT", "confirm_reset": "RESET"}.get(id, "OK")
+		"run_over":
+			var half: float = (width - 20) * 0.5
+			return [make_button("home", Rect2(x, card.end.y - 120, half, BUTTON_H), "HOME", "ghost"),
+				make_button("run_again", Rect2(x + half + 20, card.end.y - 120, half, BUTTON_H), "NEW RUN", "primary")]
+		"intro":
+			return [make_button("begin", Rect2(x, card.end.y - 120, width, BUTTON_H), "BEGIN", "primary")]
+		"round_won":
+			return [make_button("to_camp", Rect2(x, card.end.y - 120, width, BUTTON_H), "TO CAMP", "primary")]
+		"talismans":
+			return [make_button("done", Rect2(x, card.end.y - 120, width, BUTTON_H), "DONE", "primary")]
+	var confirm_label: String = {"confirm_new": "START NEW", "confirm_exit": "EXIT", "confirm_reset": "RESET",
+		"confirm_run_new": "START NEW", "confirm_abandon": "ABANDON"}.get(id, "OK")
 	var half_width: float = (width - 20) * 0.5
 	return [make_button("cancel", Rect2(x, card.end.y - 120, half_width, BUTTON_H), "CANCEL", "ghost"),
 		make_button(id, Rect2(x + half_width + 20, card.end.y - 120, half_width, BUTTON_H), confirm_label, "danger" if id != "confirm_exit" else "primary")]
@@ -1036,6 +1395,19 @@ func tile_at(rect: Rect2, element: int, alpha: float = 1.0, grow_scale: float = 
 	canvas.draw_style_box(panel(with_alpha(COLORS[element], alpha), radius), rect)
 	if element == 0:
 		return
+	if element >= Model.STONE:
+		# Stone: a few chiselled marks. Cracked Stone: a jagged split.
+		var a: Vector2 = rect.position
+		var w: float = rect.size.x
+		var ink: Color = with_alpha(Color(0.12, 0.15, 0.15), 0.55 * alpha)
+		if element == Model.STONE:
+			canvas.draw_line(a + Vector2(w * 0.22, w * 0.3), a + Vector2(w * 0.45, w * 0.3), ink, 3, true)
+			canvas.draw_line(a + Vector2(w * 0.55, w * 0.62), a + Vector2(w * 0.8, w * 0.62), ink, 3, true)
+			canvas.draw_line(a + Vector2(w * 0.25, w * 0.75), a + Vector2(w * 0.4, w * 0.75), ink, 3, true)
+		else:
+			canvas.draw_polyline(PackedVector2Array([a + Vector2(w * 0.5, w * 0.08), a + Vector2(w * 0.38, w * 0.38),
+				a + Vector2(w * 0.6, w * 0.55), a + Vector2(w * 0.42, w * 0.92)]), ink, 4, true)
+		return
 	# A soft top highlight gives each shard a little depth.
 	canvas.draw_style_box(panel(Color(1, 1, 1, 0.2 * alpha), radius), Rect2(rect.position + Vector2(4, 3), Vector2(rect.size.x - 8, rect.size.y * 0.3)))
 	var symbol_size: int = maxi(14, int(rect.size.y / grow_scale * 0.45))
@@ -1053,8 +1425,19 @@ func draw_button(entry: Dictionary) -> void:
 	var pressed: bool = pointer_down and press_kind == "button" and press_id == entry.id
 	if pressed:
 		rect = rect.grow(-3)
-	var kind: String = entry.kind if enabled else "disabled"
+	var kind: String = entry.kind if enabled or entry.kind == "offer" else "disabled"
 	match kind:
+		"card":
+			draw_talisman_card(entry, rect)
+		"offer":
+			draw_offer(entry, rect, enabled)
+		"chip":
+			var selected_chip: bool = entry.get("selected", false)
+			draw_badge(rect.grow(-2), entry.talisman)
+			if selected_chip:
+				canvas.draw_style_box(panel(Color.TRANSPARENT, 18, GOLD, 4), rect.grow(2))
+		"talisman_bar":
+			draw_talisman_bar(rect)
 		"primary":
 			canvas.draw_style_box(panel(CREAM.darkened(0.08) if pressed else CREAM, 18), rect)
 			centered(entry.label, rect if not entry.has("sub") else Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.62)), 28, INK, true)
@@ -1086,6 +1469,66 @@ func draw_button(entry: Dictionary) -> void:
 		_:
 			canvas.draw_style_box(panel(CARD, 18, EDGE, 2), rect)
 			centered(entry.label, rect, 25, CREAM, true)
+
+## A talisman's badge: archetype colour, rarity rim and its two letters.
+func draw_badge(rect: Rect2, id: String, alpha: float = 1.0) -> void:
+	var info: Dictionary = Talismans.info(id)
+	var radius: int = int(clampf(rect.size.y * 0.22, 6, 20))
+	canvas.draw_style_box(panel(with_alpha(Talismans.color(id), alpha), radius, with_alpha(Talismans.RARITY_COLORS[int(info.rarity)], alpha), 3), rect)
+	centered(info.code, rect, int(clampf(minf(rect.size.x, rect.size.y) * 0.38, 12, 40)), with_alpha(INK, alpha), true)
+
+func draw_talisman_card(entry: Dictionary, rect: Rect2) -> void:
+	var id: String = entry.talisman
+	var info: Dictionary = Talismans.info(id)
+	var picked: bool = entry.get("selected", false)
+	canvas.draw_style_box(panel(Color("2b5054") if picked else CARD, 20, GOLD if picked else with_alpha(Talismans.RARITY_COLORS[int(info.rarity)], 0.7), 3 if picked else 2), rect)
+	draw_badge(Rect2(rect.position + Vector2(20, 22), Vector2(96, 96)), id)
+	label_at(info.name, rect.position + Vector2(136, 50), 29, CREAM, true)
+	label_at("%s  -  %s" % [Talismans.RARITY_NAMES[int(info.rarity)], info.group], rect.position + Vector2(136, 80), 19, MUTED)
+	wrapped(info.text, rect.position + Vector2(136, 90), rect.size.x - 160, 22, CREAM)
+	if entry.has("tag"):
+		var tag = Rect2(rect.end.x - 92, rect.position.y + 16, 76, 30)
+		canvas.draw_style_box(panel(with_alpha(GOLD, 0.2), 15, GOLD, 1), tag)
+		centered(entry.tag, tag, 16, GOLD, true)
+
+func draw_offer(entry: Dictionary, rect: Rect2, enabled: bool) -> void:
+	var id: String = entry.talisman
+	var info: Dictionary = Talismans.info(id)
+	var sold: bool = entry.tag == "SOLD"
+	var alpha: float = 0.45 if sold else 1.0
+	canvas.draw_style_box(panel(CARD, 18, EDGE, 1), rect)
+	draw_badge(Rect2(rect.position + Vector2(16, (rect.size.y - 84) * 0.5), Vector2(84, 84)), id, alpha)
+	label_at(info.name, rect.position + Vector2(118, 48), 26, with_alpha(CREAM, alpha), true)
+	label_at("%s  -  %s" % [Talismans.RARITY_NAMES[int(info.rarity)], info.group], rect.position + Vector2(118, 76), 18, with_alpha(MUTED, alpha))
+	wrapped(info.text, rect.position + Vector2(118, 84), rect.size.x - 270, 20, with_alpha(CREAM, alpha))
+	var tag = Rect2(rect.end.x - 136, rect.position.y + (rect.size.y - 72) * 0.5, 120, 72)
+	if sold or entry.tag == "FULL":
+		centered(entry.tag, tag, 22, MUTED, true)
+		return
+	canvas.draw_style_box(panel(GOLD if enabled else Color("3a3436"), 16, GOLD if enabled else CORAL, 2), tag)
+	draw_coin(tag.position + Vector2(34, 36), 15)
+	label_at(entry.tag, tag.position + Vector2(58, 47), 30, INK if enabled else CORAL, true)
+
+func draw_coin(center: Vector2, radius: float) -> void:
+	canvas.draw_circle(center, radius, GOLD.darkened(0.15))
+	canvas.draw_circle(center, radius * 0.68, GOLD.lightened(0.25))
+
+func draw_talisman_bar(rect: Rect2) -> void:
+	canvas.draw_style_box(panel(CARD, 18, EDGE, 2), rect)
+	var held: Array = round_state.talismans
+	if held.is_empty():
+		centered("NO TALISMANS YET", rect, 20, MUTED, true)
+		return
+	var disabled: int = round_state.disabled_slot()
+	for slot in range(maxi(BASE_TALISMAN_ICONS, held.size())):
+		var icon: Rect2 = talisman_icon_rect(slot)
+		if slot >= held.size():
+			canvas.draw_style_box(panel(DEEP, 12), icon)
+			continue
+		draw_badge(icon, held[slot], 0.3 if slot == disabled else 1.0)
+		if slot == disabled:
+			canvas.draw_line(icon.position + Vector2(8, 8), icon.end - Vector2(8, 8), CORAL, 4, true)
+			canvas.draw_line(Vector2(icon.end.x - 8, icon.position.y + 8), Vector2(icon.position.x + 8, icon.end.y - 8), CORAL, 4, true)
 
 func draw_piece(piece: Dictionary, center: Vector2, pitch: float, alpha: float = 1.0) -> void:
 	var extent: Vector2 = Vector2(piece_extent(piece))
@@ -1129,13 +1572,31 @@ func paint_chrome() -> void:
 	if route == HOME:
 		paint_home()
 		return
+	if route == CAMP:
+		paint_camp_chrome()
+		return
 	canvas.draw_colored_polygon(PackedVector2Array([Vector2(330, 116), Vector2(455, 22), Vector2(590, 116)]), Color("264b4e"))
 	canvas.draw_colored_polygon(PackedVector2Array([Vector2(433, 39), Vector2(455, 22), Vector2(479, 40), Vector2(456, 34)]), CREAM.darkened(0.18))
-	label_at("SUMMIT SHARDS", Vector2(40, 62), 24, GOLD, true)
-	label_at("FLOOR 01  /  TRAIL", Vector2(40, 100), 22, MUTED)
+	if mode == RUN and run != null:
+		label_at("FLOOR %d  /  %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage].to_upper()], Vector2(40, 62), 24, GOLD, true)
+		var subtitle: String = Encounters.FLOOR_NAMES[run.floor_index]
+		if run.hazard != "":
+			subtitle = Encounters.hazard_name(run.hazard)
+		label_at(subtitle, Vector2(40, 100), 22, CORAL if run.stage == Encounters.GUARDIAN else MUTED, run.stage == Encounters.GUARDIAN)
+	else:
+		label_at("SUMMIT SHARDS", Vector2(40, 62), 24, GOLD, true)
+		label_at("QUICK TRAIL", Vector2(40, 100), 22, MUTED)
 	canvas.draw_style_box(panel(CARD, 18), Rect2(40, 124, 640, 182))
 	label_at("ALTITUDE", Vector2(64, 164), 20, MUTED)
 	canvas.draw_style_box(panel(EDGE, 7), Rect2(64, 264, 592, 14))
+
+func paint_camp_chrome() -> void:
+	# A low ridge and a small fire: the expedition's camp.
+	canvas.draw_colored_polygon(PackedVector2Array([Vector2(-400, 140), Vector2(120, 60), Vector2(260, 110), Vector2(400, 30),
+		Vector2(560, 100), Vector2(1120, 40), Vector2(1120, 140)]), Color("1f4245"))
+	label_at("CAMP", Vector2(40, 82), 46, CREAM, true)
+	if run != null:
+		label_at("Floor %d  -  %s cleared" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage]], Vector2(40, 118), 21, MUTED)
 
 func draw_mountains(base_y: float, scale_y: float) -> void:
 	# The ranges run well past the reference width so wide screens see slopes,
@@ -1171,8 +1632,8 @@ func paint_home() -> void:
 	centered("A little higher.", Rect2(0, 652, 720, 44), 28, GOLD)
 	var stats_rect = Rect2(80, 704, 560, 104)
 	canvas.draw_style_box(panel(CARD, 20, EDGE, 1), stats_rect)
-	var stats = [["BEST", str(profile.best_score)], ["SUMMITS", str(profile.rounds_won)],
-		["PLAYED", str(profile.rounds_played)], ["STREAK", str(profile.win_streak)]]
+	var stats = [["BEST FLOOR", str(profile.best_floor)], ["SUMMITS", str(profile.summits)],
+		["RUNS", str(profile.runs_played)], ["BEST TRAIL", fmt_int(profile.best_score)]]
 	for i in range(stats.size()):
 		var column = Rect2(stats_rect.position.x + i * 140, stats_rect.position.y, 140, stats_rect.size.y)
 		centered(stats[i][1], Rect2(column.position + Vector2(0, 8), Vector2(column.size.x, 56)), 36, CREAM, true)
@@ -1185,6 +1646,8 @@ func paint_hud() -> void:
 		return
 	if route == PLAY:
 		paint_play_hud()
+	elif route == CAMP:
+		paint_camp()
 	# Buttons stay on screen while a delayed dialog waits for its entrance.
 	if dialogs.is_empty() or _overlay_waiting:
 		for entry in screen_buttons():
@@ -1195,9 +1658,9 @@ func paint_hud() -> void:
 func paint_score() -> void:
 	if round_state == null or route != PLAY:
 		return
-	var shown: String = str(int(display_score))
+	var shown: String = fmt_int(int(display_score))
 	label_at(shown, Vector2(64, 232), 60, CREAM, true)
-	label_at("/ %d" % round_state.target, Vector2(76 + text_width(shown, 60, true), 230), 26, MUTED)
+	label_at("/ %s" % fmt_int(round_state.target), Vector2(76 + text_width(shown, 60, true), 230), 26, MUTED)
 	var bar = Rect2(64, 264, 592, 14)
 	var preview: Dictionary = current_preview()
 	if not preview.is_empty():
@@ -1214,7 +1677,12 @@ func paint_score() -> void:
 
 func paint_play_hud() -> void:
 	var playing: bool = round_state.status == Model.PLAYING
-	right_aligned("BEST %d" % profile.best_score, 656, 164, 20, MUTED)
+	if mode == RUN and run != null:
+		var coin_text: String = fmt_int(run.coins + round_state.coins_found)
+		right_aligned(coin_text, 656, 166, 24, GOLD, true)
+		draw_coin(Vector2(656 - text_width(coin_text, 24, true) - 20, 158), 11)
+	else:
+		right_aligned("BEST %s" % fmt_int(profile.best_score), 656, 164, 20, MUTED)
 	right_aligned("TRAY %d / %d" % [round_state.trays_dealt, round_state.max_trays], 656, 204, 22, CREAM, true)
 	for i in range(round_state.max_trays):
 		var pip = Rect2(656 - (round_state.max_trays - i) * 22 + 4, 218, 14, 14)
@@ -1232,6 +1700,39 @@ func paint_play_hud() -> void:
 			centered("PLACED", rect, 20, with_alpha(MUTED, 0.6))
 		elif not _fits[slot] and playing:
 			centered("NO ROOM", Rect2(rect.position.x, rect.end.y - 34, rect.size.x, 26), 17, CORAL, true)
+
+## Camp: coins, section titles, the empty talisman slots and the details of
+## whatever is selected. The cards and chips themselves are buttons.
+func paint_camp() -> void:
+	if run == null:
+		return
+	var chip = Rect2(392, 30, 180, 76)
+	canvas.draw_style_box(panel(CARD, 20, GOLD, 1), chip)
+	draw_coin(chip.position + Vector2(40, 38), 18)
+	label_at(fmt_int(run.coins), chip.position + Vector2(70, 50), 34, CREAM, true)
+	if run.draft_open:
+		label_at("FREE TALISMAN", Vector2(40, 164), 26, GOLD, true)
+		label_at("Choose one, or skip it for +%d Coins." % Run.SKIP_COINS if run.has_room() else "Slots full: pick a card, then a talisman to swap out.", Vector2(40, 196), 20, MUTED)
+	else:
+		label_at("TRADER", Vector2(40, 170), 26, GOLD, true)
+		label_at("Coins kept earn +1 per 5 (max 5) each round.", Vector2(40, 206), 19, MUTED)
+		if run.reward.has("total"):
+			label_at("Last round: +%d Coins" % run.reward.total, Vector2(40, 232), 18, with_alpha(MUTED, 0.8))
+	label_at("YOUR TALISMANS  %d / %d" % [run.talismans.size(), run.slots()], Vector2(40, CAMP_CHIPS_Y - 14), 20, MUTED, true)
+	var chip_area = Rect2(40, CAMP_CHIPS_Y, 640, 112)
+	for slot in range(run.talismans.size(), run.slots()):
+		canvas.draw_style_box(panel(DEEP, 18, EDGE, 1), chip_rect(chip_area, slot, run.slots(), 112).grow(-2))
+	var detail = Vector2(40, 976)
+	if camp_pending >= 0 and camp_pending < run.draft.size():
+		wrapped("Tap one of your talismans to swap it for %s. The old one sells for half its price." % Talismans.info(run.draft[camp_pending]).name, detail, 640, 21, GOLD)
+	elif camp_selected >= 0 and camp_selected < run.talismans.size():
+		var info: Dictionary = Talismans.info(run.talismans[camp_selected])
+		label_at(info.name, detail + Vector2(0, 18), 24, CREAM, true)
+		wrapped(info.text, detail + Vector2(0, 26), 640, 20, MUTED)
+	elif run.talismans.is_empty():
+		wrapped("Talismans change how every placement scores. Take the free one!", detail, 640, 21, MUTED)
+	else:
+		wrapped("Tap a talisman to read, move or sell it. Every +Base and +Mult adds first, then every xMult multiplies. Mirror Lake copies its right-hand neighbour.", detail, 640, 21, MUTED)
 
 ## Board tiles. Repaints when a move changes the board, and once when
 ## placement pops finish; never while a shard is dragged across it.
@@ -1287,6 +1788,13 @@ func paint_fx() -> void:
 	for entry in effects.particles:
 		var state: Dictionary = effects.particle_state(entry)
 		canvas.draw_rect(Rect2(state.pos - Vector2.ONE * entry.size * 0.5, Vector2.ONE * entry.size), with_alpha(entry.color, state.alpha))
+	if mode == RUN:
+		# The fx layer shakes with the board; flashes sit on the steady bar.
+		canvas.draw_set_transform(-fx_layer.position)
+		for slot in effects.flashes:
+			var glow: float = effects.flash_alpha(slot)
+			canvas.draw_style_box(panel(with_alpha(GOLD, 0.35 * glow), 14, with_alpha(GOLD, glow), 4), talisman_icon_rect(slot).grow(5))
+		canvas.draw_set_transform(Vector2.ZERO)
 	for entry in effects.texts:
 		var state: Dictionary = effects.text_state(entry)
 		canvas.draw_set_transform(state.pos, 0, Vector2.ONE * state.scale)
@@ -1319,8 +1827,12 @@ func paint_overlay() -> void:
 	match id:
 		"pause":
 			centered("PAUSED", Rect2(card.position.x, top + 36, card.size.x, 56), 44, CREAM, true)
-			centered("Altitude %d / %d  -  Tray %d / %d" % [round_state.score, round_state.target, round_state.trays_dealt, round_state.max_trays],
-				Rect2(card.position.x, top + 100, card.size.x, 36), 21, MUTED)
+			var where: String = "Altitude %s / %s  -  Tray %d / %d" % [fmt_int(round_state.score), fmt_int(round_state.target), round_state.trays_dealt, round_state.max_trays]
+			if mode == RUN and route == CAMP:
+				where = "Camp on floor %d  -  %s Coins" % [run.floor_reached(), fmt_int(run.coins)]
+			elif mode == RUN:
+				where = "Floor %d %s  -  %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage], where]
+			centered(where, Rect2(card.position.x, top + 100, card.size.x, 36), 20, MUTED)
 		"settings":
 			centered("SETTINGS", Rect2(card.position.x, top + 30, card.size.x, 60), 40, CREAM, true)
 		"help":
@@ -1332,9 +1844,11 @@ func paint_overlay() -> void:
 				centered(str(i + 1), badge, 22, INK, true)
 				y += maxf(56.0, wrapped(HELP_LINES[i], Vector2(inner.position.x + 64, y), inner.size.x - 64, 24, CREAM)) + 22
 			var sample_y: float = minf(y + 6, card.end.y - 250)
-			label_at("SYMBOLS", Vector2(inner.position.x, sample_y + 20), 18, MUTED)
+			label_at("ELEMENTS", Vector2(inner.position.x, sample_y + 20), 18, MUTED)
 			for e in range(1, 6):
-				tile_at(Rect2(inner.position.x + (e - 1) * 66, sample_y + 36, 56, 56), e)
+				var sample = Rect2(inner.position.x + (e - 1) * 90, sample_y + 34, 56, 56)
+				tile_at(sample, e)
+				centered(Talismans.ELEMENT_NAMES[e], Rect2(sample.position.x - 12, sample.end.y + 4, 80, 24), 16, MUTED)
 		"result":
 			var won: bool = round_state.status == Model.WON
 			centered("SUMMIT REACHED" if won else "TRAIL ENDS", Rect2(card.position.x, top + 34, card.size.x, 60), 42, GOLD if won else CREAM, true)
@@ -1352,15 +1866,121 @@ func paint_overlay() -> void:
 				canvas.draw_style_box(panel(DEEP, 14), Rect2(inner.position.x, row_y, inner.size.x, 58))
 				label_at(rows[i][0], Vector2(inner.position.x + 22, row_y + 38), 23, MUTED)
 				right_aligned(rows[i][1], inner.end.x - 22, row_y + 39, 25, CREAM, true)
+		"intro":
+			paint_intro(card, inner)
+		"round_won":
+			paint_round_won(card, inner)
+		"run_over":
+			paint_run_over(card, inner)
+		"talismans":
+			paint_talisman_list(card, inner)
 		_:
-			var titles = {"confirm_new": "Start a new trail?", "confirm_exit": "Leave Summit Shards?", "confirm_reset": "Reset statistics?"}
+			var titles = {"confirm_new": "Start a new trail?", "confirm_exit": "Leave Summit Shards?", "confirm_reset": "Reset statistics?",
+				"confirm_run_new": "Start a new expedition?", "confirm_abandon": "Abandon this expedition?"}
 			var bodies = {"confirm_new": "This trail ends here and counts as played.",
-				"confirm_exit": "Your trail is saved. Pick up where you left off next time.",
-				"confirm_reset": "Best altitude, summits and streaks go back to zero. Your current trail and settings stay."}
+				"confirm_exit": "Your game is saved. Pick up where you left off next time.",
+				"confirm_reset": "Best floor, summits, runs and trail records go back to zero. Your games in progress and settings stay.",
+				"confirm_run_new": "Your current expedition ends here and counts as a run.",
+				"confirm_abandon": "The expedition ends here and counts as a run. Your talismans are lost."}
 			centered(titles.get(id, ""), Rect2(card.position.x, top + 34, card.size.x, 60), 36, CREAM, true)
 			wrapped(bodies.get(id, ""), Vector2(inner.position.x, top + 110), inner.size.x, 24, MUTED)
 	for entry in dialog_buttons(id):
 		draw_button(entry)
+
+## Before each expedition round: where you are, the target and the rule.
+func paint_intro(card: Rect2, inner: Rect2) -> void:
+	if run == null:
+		return
+	var top: float = card.position.y
+	var guardian: bool = run.stage == Encounters.GUARDIAN
+	centered("FLOOR %d  /  %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage].to_upper()], Rect2(card.position.x, top + 30, card.size.x, 50), 32, CORAL if guardian else GOLD, true)
+	centered(Encounters.FLOOR_NAMES[run.floor_index], Rect2(card.position.x, top + 80, card.size.x, 34), 22, MUTED)
+	centered("TARGET", Rect2(card.position.x, top + 128, card.size.x, 30), 20, MUTED)
+	centered(fmt_int(run.round.target), Rect2(card.position.x, top + 150, card.size.x, 90), 76, CREAM, true)
+	centered("%d trays  -  %d %s  -  %d talismans" % [run.round.max_trays, run.round.rerolls, "reroll" if run.round.rerolls == 1 else "rerolls", run.talismans.size()],
+		Rect2(card.position.x, top + 244, card.size.x, 34), 21, MUTED)
+	var box = Rect2(inner.position.x, top + 296, inner.size.x, 300)
+	canvas.draw_style_box(panel(DEEP, 18, CORAL if guardian else EDGE, 2 if guardian else 1), box)
+	var y: float = box.position.y + 20
+	if notice.begins_with("The Firebird"):
+		y += wrapped(notice, Vector2(box.position.x + 20, y), box.size.x - 40, 22, GOLD) + 12
+	if run.hazard == "":
+		label_at("A clear trail", Vector2(box.position.x + 20, y + 26), 26, CREAM, true)
+		wrapped("No hazards. Bank Coins and build your combo.", Vector2(box.position.x + 20, y + 40), box.size.x - 40, 22, MUTED)
+		return
+	label_at(Encounters.hazard_name(run.hazard), Vector2(box.position.x + 20, y + 26), 27, CORAL if guardian else CREAM, true)
+	y += 40
+	for id in run.hazard_ids() if run.hazard == "summit_warden" else [run.hazard]:
+		var text: String = Encounters.hazard_text(id)
+		if run.hazard == "summit_warden":
+			text = "%s: %s" % [Encounters.hazard_name(id), text]
+		y += wrapped(text, Vector2(box.position.x + 20, y), box.size.x - 40, 22, CREAM) + 8
+	var rules: Dictionary = run.round.rules
+	if int(rules.get("stones_start", 0)) + int(rules.get("rockfall", 0)) + int(rules.get("frost", 0)) > 0:
+		wrapped(Encounters.STONE_TEXT, Vector2(box.position.x + 20, y + 4), box.size.x - 40, 19, MUTED)
+
+func paint_round_won(card: Rect2, inner: Rect2) -> void:
+	var top: float = card.position.y
+	centered("ROUND CLEARED", Rect2(card.position.x, top + 34, card.size.x, 56), 40, GOLD, true)
+	centered("Floor %d %s  -  %s / %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage], fmt_int(run.round.score), fmt_int(run.round.target)],
+		Rect2(card.position.x, top + 92, card.size.x, 34), 21, MUTED)
+	var rows: Array = [["Round reward", int(run.reward.get("round", 0))], ["Unused trays", int(run.reward.get("trays", 0))],
+		["Interest", int(run.reward.get("interest", 0))]]
+	if int(run.reward.get("found", 0)) > 0:
+		rows.append(["Found on the board", int(run.reward.found)])
+	for i in range(rows.size()):
+		var y: float = top + 150 + i * 66
+		canvas.draw_style_box(panel(DEEP, 14), Rect2(inner.position.x, y, inner.size.x, 54))
+		label_at(rows[i][0], Vector2(inner.position.x + 22, y + 35), 22, MUTED)
+		right_aligned("+%d" % rows[i][1], inner.end.x - 22, y + 36, 24, CREAM, true)
+	var total_y: float = top + 160 + rows.size() * 66
+	draw_coin(Vector2(card.get_center().x - 92, total_y + 34), 20)
+	label_at("+%d COINS" % int(run.reward.get("total", 0)), Vector2(card.get_center().x - 62, total_y + 48), 36, GOLD, true)
+	centered("You have %s Coins. Spend them at Camp." % fmt_int(run.coins), Rect2(card.position.x, total_y + 70, card.size.x, 34), 20, MUTED)
+
+func paint_run_over(card: Rect2, inner: Rect2) -> void:
+	var top: float = card.position.y
+	var won: bool = run.phase == Run.WON
+	centered("SUMMIT REACHED" if won else "EXPEDITION ENDS", Rect2(card.position.x, top + 34, card.size.x, 60), 40, GOLD if won else CREAM, true)
+	centered("All eight floors climbed." if won else "%s  -  Floor %d %s" % [Encounters.FLOOR_NAMES[run.floor_index], run.floor_reached(), Encounters.STAGE_NAMES[run.stage]],
+		Rect2(card.position.x, top + 96, card.size.x, 36), 21, MUTED)
+	centered("SUMMIT" if won else "FLOOR %d" % run.floor_reached(), Rect2(card.position.x, top + 140, card.size.x, 110), 80, CREAM, true)
+	if last_run_summary.get("new_best_floor", false):
+		var badge = Rect2(card.get_center().x - 110, top + 262, 220, 42)
+		canvas.draw_style_box(panel(GOLD, 21), badge)
+		centered("NEW BEST FLOOR", badge, 21, INK, true)
+	var rows = [["Rounds won", str(run.rounds_won)], ["Lines cleared", fmt_int(run.lines)], ["Best move", "+" + fmt_int(run.best_move)]]
+	for i in range(rows.size()):
+		var y: float = top + 326 + i * 66
+		canvas.draw_style_box(panel(DEEP, 14), Rect2(inner.position.x, y, inner.size.x, 54))
+		label_at(rows[i][0], Vector2(inner.position.x + 22, y + 35), 22, MUTED)
+		right_aligned(rows[i][1], inner.end.x - 22, y + 36, 24, CREAM, true)
+	var badge_y: float = top + 536
+	label_at("YOUR BUILD", Vector2(inner.position.x, badge_y), 18, MUTED, true)
+	if run.talismans.is_empty():
+		label_at("No talismans", Vector2(inner.position.x, badge_y + 40), 21, MUTED)
+	for slot in range(run.talismans.size()):
+		draw_badge(chip_rect(Rect2(inner.position.x, badge_y + 14, inner.size.x, 70), slot, maxi(5, run.talismans.size()), 70), run.talismans[slot])
+
+## Every held talisman with its rule, in slot order (the order xMult uses).
+func paint_talisman_list(card: Rect2, inner: Rect2) -> void:
+	var top: float = card.position.y
+	var held: Array = round_state.talismans
+	var slot_count: int = run.slots() if run != null else BASE_TALISMAN_ICONS
+	centered("TALISMANS  %d / %d" % [held.size(), slot_count], Rect2(card.position.x, top + 28, card.size.x, 56), 36, CREAM, true)
+	if held.is_empty():
+		wrapped("None yet. Win a round to reach Camp, where you can take a free talisman and buy more.", Vector2(inner.position.x, top + 110), inner.size.x, 23, MUTED)
+		return
+	var disabled: int = round_state.disabled_slot()
+	var row_h: float = minf(116.0, 760.0 / held.size())
+	for slot in range(held.size()):
+		var y: float = top + 100 + slot * row_h
+		var info: Dictionary = Talismans.info(held[slot])
+		draw_badge(Rect2(inner.position.x, y + 6, row_h - 20, row_h - 20), held[slot], 0.35 if slot == disabled else 1.0)
+		var x: float = inner.position.x + row_h + 4
+		label_at(info.name + ("   (disabled this tray)" if slot == disabled else ""), Vector2(x, y + 30), 23, CORAL if slot == disabled else CREAM, true)
+		wrapped(info.text, Vector2(x, y + 36), inner.end.x - x, 19, MUTED)
+	wrapped("Scoring adds every +Base, then every +Mult, then applies every xMult. Mirror Lake copies the talisman to its right.", Vector2(inner.position.x, card.end.y - 196), inner.size.x, 19, with_alpha(MUTED, 0.85))
 
 # ---------------------------------------------------------------- persistence
 
@@ -1370,10 +1990,39 @@ func save_settings() -> bool:
 func save_profile() -> bool:
 	return Store.write(profile_path, profile.to_dict())
 
-func save_round() -> bool:
-	if round_state == null:
+## Saves whichever game is being played.
+func save_active() -> bool:
+	return save_run() if mode == RUN else save_round()
+
+func save_run() -> bool:
+	if run == null:
 		return false
-	var payload: String = JSON.stringify(round_state.snapshot())
+	return Store.write(run_path, run.snapshot())
+
+## Loads a saved expedition. A run saved between a finished round and its
+## settlement is settled now; a finished run is counted once.
+func load_run() -> bool:
+	var data: Dictionary = Store.read(run_path)
+	if data.is_empty():
+		return false
+	var restored = Run.new(1)
+	if not restored.restore_snapshot(data):
+		return false
+	run = restored
+	if run.phase == Run.ROUND and run.round.status != Model.PLAYING:
+		run.after_round_command()
+		save_run()
+	if run.phase == Run.WON or run.phase == Run.LOST:
+		record_run()
+	return true
+
+func run_active() -> bool:
+	return run != null and run.phase != Run.WON and run.phase != Run.LOST
+
+func save_round() -> bool:
+	if quick_round == null:
+		return false
+	var payload: String = JSON.stringify(quick_round.snapshot())
 	var checksum: String = payload.sha256_text()
 	# Pause/focus callbacks often arrive together. Do not rewrite an unchanged
 	# round or rotate its useful previous-move backup for those notifications.
@@ -1417,9 +2066,11 @@ func load_round() -> bool:
 		if parser.parse(envelope.payload) != OK:
 			continue
 		var data = parser.data
-		if data is Dictionary and round_state.restore_snapshot(data):
+		if data is Dictionary and quick_round.restore_snapshot(data):
 			_loaded_from_backup = path != save_path
-			_last_saved_sha = JSON.stringify(round_state.snapshot()).sha256_text()
+			_last_saved_sha = JSON.stringify(quick_round.snapshot()).sha256_text()
+			if mode != QUICK:
+				return true
 			selected = -1
 			cancel_gesture()
 			effects.clear_all()

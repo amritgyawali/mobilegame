@@ -2,6 +2,17 @@
 
 Updated: 2026-10-25 (Asia/Katmandu). Sources: `C:\game`. Active project: `C:\game\SummitShards`. Tools: `D:\SummitShardsToolchain`.
 
+## 0.3.0-dev Expedition (2026-10-25)
+
+Version code 5, version `0.3.0-dev`. Verified in the Linux container with the official Godot 4.7.2 Linux editor.
+
+- `tools/check_android_policy.py` passed; still no Android permissions.
+- **1,156 rules checks** (Quick Trail unchanged: same 1,000-seed fixture, 996 first-fit wins), **114 expedition rule checks** (`run_test`: every talisman's scoring, phases and the design's 3,638 example; Stones, Ice Axe, Rainbow Scarf; each hazard; preview equals commit across 40 seeded rounds with a 9-talisman build and every hazard; deterministic runs; rewards and interest; draft, Trader, swap, sell, Ninth Peak, reorder; Camp choices never change upcoming hazards or shards; Firebird; the Warden and summit; run and round save round trips and rejection of damaged saves), **91 scene checks** and **35 expedition scene checks** (Home, tutorial over the intro, Back on every expedition screen, Round cleared to Camp, draft, buy, move, sell, relaunch in Camp, Firebird, run over counted once, abandon, Quick Trail kept, 48 dp targets). No script errors or warnings. CI and `tools/Test-Game.ps1` now run all four suites.
+- Bot balance (`tests/balance_sim.gd`, Altitude 0): first-fit, 60 runs: mostly floors 3-4, 5 summits; greedy, 40 runs: mostly floors 5-6, 3 summits. Most common run-enders: Snowfall and Thin Air Ridges on floors 5-6, the Langur on floor 5.
+- Rendered and inspected Home, round intro, Round cleared, Camp draft, Trader, play with talismans and Stones, Talismans list and Expedition summary (`tests/render_expedition.gd`). Drawing cost unchanged: dragging about 0.08 ms per frame on this machine.
+
+Not done: no APK rebuild and no phone testing; no human playtest of the balance.
+
 ## 0.2.1-dev Android smoothness (2026-10-25)
 
 Version code 4, version `0.2.1-dev`. Verified in the same Linux container with the official Godot 4.7.2 Linux editor.

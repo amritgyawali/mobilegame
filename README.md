@@ -12,9 +12,18 @@ The active project imports, renders, passes its native checks and exports a veri
 
 ## Playable game
 
+Two modes from Home:
+
+- **Expedition** (0.3.0-dev): the roguelite run from the design. Eight floors, each with a **Trail**, a **Ridge** (with weather) and a **Guardian** round (with a boss rule), using the design's target table (300 up to 30,000). Win a round to reach **Camp**: take 1 of 3 free talismans (or skip for +3 Coins), buy from the **Trader** (reroll 2, then 3...), sell for half, reorder. Coins come from round rewards, unused trays and interest (+1 per 5 held, max 5). Lose a round and the run ends, unless a Firebird Feather saves it once. Beat The Summit Warden on Floor 8 to reach the summit. Runs save after every move and resume from Home.
+- **Quick Trail**: the original single 300-point round, unchanged.
+
+**36 talismans** from the design, across Common, Uncommon, Rare and Legendary, change scoring (+Base, +Mult, xMult, growth, economy, rerolls, trays, slots). Scoring always applies every +Base, then every +Mult, then every xMult, then the perfect-clear multiplier; Mirror Lake copies its right-hand neighbour. Each placement shows its breakdown (for example `+3,638 = 214 x 17`), and the talismans that changed it light up. **Hazards:** 5 Ridge weathers (Clear Sky, Thin Air, Rockfall, Snowfall, Golden Hour) and 7 Guardians (Stone Yak, Moon Bear, Frostmane, Thunder Kite, Langur Trickster, Crow of Lights, Summit Warden). Stone tiles take two clears to break.
+
+Balance check with `tests/balance_sim.gd` (bots, Altitude 0): a first-fit bot mostly ends on floors 3-4 and a greedy bot on floors 5-6; each reaches the summit in about 8% of runs. The design's goal is floors 3-4 for a new player. Human playtesting is still needed.
+
 **Drag a shard onto the board**: it floats above your finger, snaps to the board, shows its score and outlines the lines it will clear. Release to place; release anywhere illegal to return it. Or **tap a shard, then tap** the cell for the top-left of its bounding box (hold and slide on the board to preview first). Fill rows or columns to climb. Reach 300 altitude within eight trays, with one reroll per trail.
 
-Screens: **Home** (Continue/New Trail, lifetime stats), **How to Play** (shown on first start), **Pause**, **Settings**, **Round Result** and confirmation dialogs. Android Back cancels a drag or selection, then closes the top dialog, then pauses play, and on Home asks before exiting. Leaving the app mid-round saves and pauses. Starting a new trail mid-round asks first.
+Screens: **Home** (Expedition, Quick Trail, lifetime stats), **Round intro**, **Camp**, **Round cleared**, **Expedition summary**, **Talismans**, **How to Play** (shown on first start), **Pause**, **Settings**, **Round Result** and confirmation dialogs. Android Back cancels a drag or selection, then closes the top dialog, then pauses play, and on Home asks before exiting. Leaving the app mid-round saves and pauses. Starting a new trail mid-round asks first.
 
 Feel: placement pop, line-clear flash and bursts, floating score and combo callouts (Double, Pure Line, Streak, Perfect Clear), a small shake on big clears, an animated altitude counter and progress preview, "No room" marking on shards that cannot fit, and synthesized sound effects (no audio files). Settings: sound, line-clear preview, reduced motion and a 30 FPS battery saver.
 
@@ -67,12 +76,14 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Source layout
 
-- `SummitShards/scripts/round_model.gd`: pure round rules and versioned state, independent of scenes, clocks and filesystem.
+- `SummitShards/scripts/round_model.gd`: pure round rules and versioned state, independent of scenes, clocks and filesystem: board, shards, Stones, hazard rules and the talisman scoring pipeline.
+- `SummitShards/scripts/run_model.gd`: pure expedition state machine: floors, encounters, Coins, Camp draft and Trader, Firebird, saves.
+- `SummitShards/scripts/content/talismans.gd`, `content/encounters.gd`: talisman, weather, Guardian and target definitions (data only).
 - `SummitShards/scripts/main.gd`: screens and dialogs, tap/drag input, drawing, safe-area layout and the round save adapter.
 - `SummitShards/scripts/settings_model.gd`, `profile_model.gd`: validated player settings and lifetime statistics.
 - `SummitShards/scripts/persistence/json_store.gd`: checksummed settings/profile documents with a backup.
 - `SummitShards/scripts/ui/effects.gd`, `ui/sfx.gd`: bounded presentation effects and synthesized sound effects.
-- `SummitShards/tests`: native Godot rule checks, scene interaction/navigation/save/smoothness checks, a screen capture utility (`render_preview.gd`) and a drawing-cost probe (`perf_probe.gd`). Excluded from exported games.
+- `SummitShards/tests`: native Godot checks (`rules_test`, `run_test`, `scene_test`, `expedition_scene_test`), screen capture utilities (`render_preview.gd`, `render_expedition.gd`), a drawing-cost probe (`perf_probe.gd`) and a balance simulator (`balance_sim.gd`). Excluded from exported games.
 - `SummitShards/export_presets.cfg`: Android-only export settings.
 - `tools/check_android_policy.py`: platform and mobile-default checks, run before tests/builds.
 - `tools`: pinned manifests, isolated environment, installers, checks and build commands.
@@ -81,7 +92,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Release preparation
 
-Package ID `com.summitstudio.summitshards`, version `0.2.1-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
+Package ID `com.summitstudio.summitshards`, version `0.3.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
 
 Godot's matching `android_source.zip` and Android release export template are installed for later Gradle/AAB configuration. See [Android release steps](docs/ANDROID_RELEASE.md). The installer now selects only Android export templates. Ads, IAP, analytics, cloud services and leaderboards are not connected. API 36 is this project's configured target, not a promise about a future Play policy deadline.
 

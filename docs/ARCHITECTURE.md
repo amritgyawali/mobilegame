@@ -24,6 +24,22 @@ Presentation: a move is committed and saved before it is animated. `ui/effects.g
 
 Back cancels a drag or selection, then closes the top dialog, then opens Pause during play, and on Home asks before exiting. Pause/focus loss save; app pause mid-round also opens Pause. Resume/focus return redraw to recalculate safe areas.
 
+## Expedition (0.3.0-dev)
+
+`run_model.gd` (RefCounted, pure) owns the run: floor (0-7), stage (Trail, Ridge, Guardian), phase (`intro`, `round`, `camp`, `won`, `lost`), Coins, talismans in slot order, the current round, Camp offers and counters that persist across rounds (Snowball stacks, Eternal Glacier lines). `after_round_command()` settles a finished round exactly once: rewards and Camp, the summit, a Firebird restart, or the end of the run. The scene saves the run (`user://run-v1.json`, checksummed with a backup) after every command. A run saved between a finished round and its settlement is settled on load; a finished run is recorded in the profile once, keyed by its seed.
+
+Randomness: each round's seed is mixed from the run seed, the encounter index and the Firebird attempt. Weather and Guardians are mixed from the run seed and the encounter. Camp offers use a separate run stream. Taking a draft or rerolling the Trader therefore never changes the next round's hazard or shards (tested).
+
+Content lives in `content/talismans.gd` and `content/encounters.gd` as plain data. Talisman effects are a bounded `match` on the id in `round_model.calculate_score()` and in `run_model` (rerolls, trays, Coins, slots, Firebird); content strings are never evaluated. Targets use the design's table directly.
+
+Round configuration: an expedition round receives its talismans, rules (`stones_start`, `rockfall`, `frost`, `min_cells`, `streak_cap_halves`, `langur`, `crow`, `golden_hour`), reroll limit and Coins. Snapshots store the config and counters; saves without them (Quick Trail and 0.2.x) load with empty defaults. Quick Trail passes no config and deals exactly as before (the 1,000-seed fixture is unchanged).
+
+Scoring pipeline (`calculate_score`): Base (placed cells, removed cells x10, pure lines x50, Stones broken, +Base talismans, perfect +200); then Mult (1, extra lines, pure lines, capped streak, +Mult talismans); then each xMult talisman; then the perfect-clear multiplier (x3, Clean Slate x5). This keeps the project's global-phase decision, so slot order matters only for Mirror Lake (copies the talisman to its right), the Langur (one disabled slot, moving right every tray) and the Crow (shuffles the order every tray). `evaluate()` computes a move on a copy of the board and is shared by the preview and the real move, so they always agree; Golden Hour Coins are rolled after scoring.
+
+Tiles: 0 empty, 1-5 elements (Sky, Wind, Fire, Water, Earth), 6 Stone, 7 Cracked Stone. A clear cracks Stone and removes Cracked Stone (Ice Axe: Stone breaks at once). Stones complete lines but never make them pure. Stones are placed by choosing among empty cells with a bounded shuffle, never by retrying random positions.
+
+Simplifications versus the design, kept explicit: the Summit Warden applies the rules of the last two Guardians beaten instead of three phases; Snowfall and Frostmane use Stone rather than Frozen tiles; 12 talismans that need systems not built yet (bonus tiles, Frozen tiles, interest changes, rotation) are not included; there are no runes, Forge, climbers, Altitudes or unlocks yet.
+
 ## Rules
 
 - 19 fixed shapes: dot, horizontal/vertical bars of lengths 2-5, four small-L rotations, four five-cell-L rotations, 2x2 and 3x3 squares. No runtime rotation or gravity.

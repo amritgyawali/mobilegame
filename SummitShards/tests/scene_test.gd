@@ -70,8 +70,8 @@ func run() -> void:
 	await make_app()
 
 	# Fresh install: home screen, first start shows the tutorial once.
-	check(app.route == app.HOME and ids().has("start") and not ids().has("continue"), "Fresh install opens Home with Start")
-	check(click_button("start") and app.route == app.PLAY, "Start opens the round")
+	check(app.route == app.HOME and ids().has("run_new") and ids().has("quick") and not ids().has("run_continue"), "Fresh install opens Home with Expedition and Quick Trail")
+	check(click_button("quick") and app.route == app.PLAY and app.mode == app.QUICK, "Quick Trail opens the round")
 	check(app.dialogs == ["help"] and app.profile.seen_tutorial, "First start shows How to Play")
 	check(Store.read(PROFILE_PATH).get("seen_tutorial") == true, "Tutorial flag is saved")
 	var untouched: String = state()
@@ -162,12 +162,13 @@ func run() -> void:
 	app.notification(Node.NOTIFICATION_WM_GO_BACK_REQUEST)
 	check(app.dialogs == ["pause"], "Back during play opens Pause")
 	click_button("home")
-	check(app.route == app.HOME and app.dialogs.is_empty() and ids().has("continue"), "Home offers Continue for a trail in progress")
+	var quick_label: String = app.current_buttons().filter(func(b): return b.id == "quick")[0].label
+	check(app.route == app.HOME and app.dialogs.is_empty() and quick_label == "CONTINUE QUICK TRAIL", "Home offers to continue a trail in progress")
 	app.notification(Node.NOTIFICATION_WM_GO_BACK_REQUEST)
 	check(app.dialogs == ["confirm_exit"], "Back on Home asks before exiting")
 	app.notification(Node.NOTIFICATION_WM_GO_BACK_REQUEST)
 	check(app.dialogs.is_empty() and app.route == app.HOME, "Back dismisses the exit question")
-	click_button("continue")
+	click_button("quick")
 	check(app.route == app.PLAY and app.dialogs.is_empty() and state() == before_back, "Continue resumes without a tutorial")
 
 	# Starting over asks first, and counts the abandoned trail once.
@@ -265,7 +266,7 @@ func run() -> void:
 
 	# Smoothness: still screens paint nothing; motion moves layers instead of
 	# repainting them; battery-saving low-processor mode returns when still.
-	check(click_button("start") and app.route == app.PLAY, "Start resumes the untouched trail")
+	check(click_button("quick") and app.route == app.PLAY, "Quick Trail resumes the untouched trail")
 	await wait(0.5)
 	check(app.content.modulate.a == 1.0 and app.content.position == app.layout_offset, "Screen transition settles")
 	var passes: int = app.draw_passes()
