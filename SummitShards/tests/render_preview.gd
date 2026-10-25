@@ -16,9 +16,13 @@ func frames(count: int) -> void:
 	app.queue_redraw()
 	await RenderingServer.frame_post_draw
 
-func shot(name: String) -> bool:
+## Waits for transitions to settle, then saves the viewport. File names carry
+## the window size so captures from several phone shapes can sit together.
+func shot(name: String, settle: float = 0.45) -> bool:
+	if settle > 0.0:
+		await create_timer(settle).timeout
 	await frames(3)
-	var path: String = ProjectSettings.globalize_path("res://../Builds/SummitShards-%s.png" % name)
+	var path: String = ProjectSettings.globalize_path("res://../Builds/SummitShards-%dx%d-%s.png" % [DisplayServer.window_get_size().x, DisplayServer.window_get_size().y, name])
 	var result: int = root.get_texture().get_image().save_png(path)
 	print("Captured ", path, " result=", result)
 	return result == OK
@@ -80,10 +84,13 @@ func capture() -> void:
 	app.round_state.board[56] = 0
 	app.round_state.tray[0] = {"shape": 0, "element": 2}
 	app.commit_place(0, Vector2i(0, 7))
-	app.effects.update(0.12)
+	# Freeze the effects 0.12 s in.
 	app.set_process(false)
-	ok = await shot("preview-clear") and ok
+	app.effects.update(0.12)
+	app.fx_layer.queue_redraw()
+	ok = await shot("preview-clear", 0.0) and ok
 	app.effects.clear_all()
+	app.start_animation()
 	app.dialogs.clear()
 	app.settings.set_value("reduced_motion", true)
 	app.apply_settings()
@@ -95,7 +102,9 @@ func capture() -> void:
 			continue
 		app.commit_place(move[0], Vector2i(move[1], move[2]))
 	if app.dialogs != ["result"]:
-		app.dialogs = ["result"]
+		app.dialogs.clear()
+		app.open_dialog("result")
+		app.refresh_view()
 	ok = await shot("preview-result") and ok
 	app.queue_free()
 	await process_frame

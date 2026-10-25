@@ -52,6 +52,10 @@ func first_move() -> Array:
 					return [slot, Vector2i(x, y)]
 	return []
 
+func wait(seconds: float) -> void:
+	await create_timer(seconds).timeout
+	await process_frame
+
 func make_app() -> void:
 	app = Scene.instantiate()
 	app.save_path = ROUND_PATH
@@ -258,6 +262,87 @@ func run() -> void:
 	check(app.route == app.HOME and state() == trail, "Relaunch restores the trail")
 	check(not app.settings.get_value("sound") and not app.sfx.enabled, "Relaunch restores settings")
 	check(app.profile.seen_tutorial and app.profile.rounds_played == 0, "Relaunch restores the profile")
+
+	# Smoothness: still screens paint nothing; motion moves layers instead of
+	# repainting them; battery-saving low-processor mode returns when still.
+	check(click_button("start") and app.route == app.PLAY, "Start resumes the untouched trail")
+	await wait(0.5)
+	check(app.content.modulate.a == 1.0 and app.content.position == app.layout_offset, "Screen transition settles")
+	var passes: int = app.draw_passes()
+	for i in range(30):
+		await process_frame
+	check(app.draw_passes() == passes, "A still screen repaints nothing")
+	check(OS.low_processor_usage_mode and not app.is_processing(), "A still screen is in low-power mode")
+	move = first_move()
+	var board_passes: int = app.draw_passes(["board"])
+	var drag_passes: int = app.draw_passes(["drag"])
+	finger = app.finger_for_anchor(move[0], move[1])
+	app.pointer_pressed(app.tray_rect(move[0]).get_center())
+	app.pointer_moved(finger, true)
+	check(app.dragging and not OS.low_processor_usage_mode and app.is_processing(), "Dragging lifts low-power mode")
+	await wait(0.3)
+	passes = app.draw_passes()
+	for i in range(10):
+		app.pointer_moved(finger + Vector2(i % 3, -(i % 2)), true)
+		await process_frame
+	check(app.draw_passes() == passes, "Moving within one cell repaints nothing")
+	check(app.drag_layer.position == finger + Vector2(0, -1) and app.drag_layer.scale == Vector2.ONE, "The shard follows the finger at board size")
+	var static_layers: Array = ["chrome", "board", "hud", "drag", "slot0", "slot1", "slot2"]
+	var static_passes: int = app.draw_passes(static_layers)
+	var light_passes: int = app.draw_passes(["preview", "score"])
+	var step: Vector2 = Vector2(-app.CELL, 0) if move[1].x > 0 else Vector2(app.CELL, 0)
+	app.pointer_moved(finger + step, true)
+	await process_frame
+	check(app.draw_passes(static_layers) == static_passes and app.draw_passes(["preview", "score"]) > light_passes, "A new cell repaints only the preview and hint")
+	app.pointer_moved(finger, true)
+	app.pointer_released(finger)
+	check(app.draw_passes(["drag"]) == drag_passes + 1, "The dragged shard paints once per drag")
+	await wait(1.2)
+	check(app.draw_passes(["board"]) - board_passes <= 2, "A move repaints the board at most twice")
+	check(OS.low_processor_usage_mode and not app.is_processing(), "Low-power mode returns after the animation")
+	# A shard dropped off the board flies home, then the slot shows it again.
+	move = first_move()
+	app.pointer_pressed(app.tray_rect(move[0]).get_center())
+	app.pointer_moved(Vector2(360, 60), true)
+	app.pointer_released(Vector2(360, 60))
+	check(app.drag_layer.visible and app.slot_layers[move[0]].self_modulate.a < 1.0, "A cancelled drag flies back to its slot")
+	await wait(0.4)
+	check(not app.drag_layer.visible and app.slot_layers[move[0]].self_modulate.a == 1.0, "The shard is back in its slot")
+	# New shards pop into the tray without repainting each frame.
+	var slot_passes: int = app.draw_passes(["slot0", "slot1", "slot2"])
+	check(click_button("reroll") and app.round_state.rerolls == 0, "Reroll for the refill check")
+	await wait(0.6)
+	check(app.draw_passes(["slot0", "slot1", "slot2"]) - slot_passes <= 3, "Refilled shards paint once each")
+	check(app.slot_layers.all(func(l): return l.scale == Vector2.ONE and l.modulate.a == 1.0), "Refill animation settles")
+	# A winning move: the result stays hidden and unpainted during the clear.
+	for x in range(1, 8):
+		app.round_state.board[56 + x] = 2
+	app.round_state.board[56] = 0
+	app.round_state.tray[0] = {"shape": 0, "element": 2}
+	app.round_state.score = app.round_state.target - 1
+	var overlay_passes: int = app.draw_passes(["overlay"])
+	check(app.commit_place(0, Vector2i(0, 7)) and app.dialogs == ["result"], "Winning move opens the result")
+	await process_frame
+	await process_frame
+	check(not app.overlay_layer.visible and app.draw_passes(["overlay"]) == overlay_passes and not app.dialog_ready(), "Result waits, unpainted, while lines clear")
+	await wait(1.3)
+	check(app.overlay_layer.visible and app.overlay_layer.modulate.a == 1.0 and app.draw_passes(["overlay"]) == overlay_passes + 1 and app.dialog_ready(), "Result fades in once, then accepts taps")
+	click_button("home")
+	await wait(0.4)
+	check(app.route == app.HOME and app.dialogs.is_empty() and not app.board_layer.visible and app.content.modulate.a == 1.0, "Home after a result")
+
+	# Any phone shape: the layout fills the width of tall screens, sits low
+	# for the thumb with a margin above the bottom edge, and centres on wide ones.
+	var original_size: Vector2 = app.size
+	app.size = Vector2(720, 1600)
+	app.update_layout()
+	var bottom: float = app.layout_offset.y + 1280 * app.layout_scale
+	check(app.layout_scale == 1.0 and app.layout_offset.y > 160 and bottom < 1600 - 60, "Tall screen: full width, lower placement, bottom margin")
+	app.size = Vector2(960, 1280)
+	app.update_layout()
+	check(app.layout_scale == 1.0 and app.layout_offset == Vector2(120, 0), "Wide screen: centred")
+	app.size = original_size
+	app.update_layout()
 
 	# Every control on every screen is a 48 dp target inside the layout.
 	var small: Array = []

@@ -2,6 +2,11 @@ extends Control
 ## Portrait touch adapter: screens, input, drawing, sound and local saves.
 ## Rules live in round_model.gd. Drawing and effects never change them: a move
 ## is committed and saved first, then animated.
+##
+## Drawing is split into layers that repaint only when their own content
+## changes. Motion (drag, shake, fades, slides, tray refills) moves or fades a
+## layer instead of repainting it, which keeps per-frame CPU work small on
+## budget Android phones.
 
 const Model = preload("res://scripts/round_model.gd")
 const Settings = preload("res://scripts/settings_model.gd")
@@ -35,6 +40,13 @@ const NEW_RECT = Rect2(40, 1172, 310, BUTTON_H)
 const REROLL_RECT = Rect2(370, 1172, 310, BUTTON_H)
 const DRAG_LIFT = 130.0
 const DRAG_THRESHOLD = 14.0
+const TRAY_PITCH_MAX = 36.0
+const SCREEN_FADE = 0.18
+const DIALOG_FADE = 0.16
+## Glyphs drawn once, invisibly, shortly after launch so the first big clear
+## or result screen does not stall while the font rasterizes them.
+const PREWARM_TEXT = "+0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ x/"
+const PREWARM_SIZES = [34, 42, 44, 46, 60, 92]
 const SETTING_ROWS = [
 	["sound", "Sound effects", "Chimes for placing and clearing."],
 	["clear_preview", "Line preview", "Outline the lines a placement will clear."],
@@ -90,6 +102,41 @@ var press_pos = Vector2.ZERO
 var dragging: bool = false
 var drag_point = Vector2.ZERO
 
+# Drawing layers, back to front. All but the overlay sit under `content`,
+# which carries the layout transform and the screen fade. They are Node2D
+# because a Control repaints when scaled; a Node2D just moves on the GPU.
+var content: Node2D
+var chrome_layer: Node2D
+var board_layer: Node2D
+var preview_layer: Node2D
+var hud_layer: Node2D
+var score_layer: Node2D
+var slot_layers: Array = []
+var fx_layer: Node2D
+var drag_layer: Node2D
+var overlay_root: Node2D
+var overlay_layer: Node2D
+var canvas: CanvasItem
+## Cumulative drawing cost per layer: {name: [passes, usec]}. Read by tests
+## and tests/perf_probe.gd; costs two clock reads per repaint.
+var perf: Dictionary = {}
+var _low_power_default: bool = true
+var _boost_until: float = 0.0
+var _content_slide: float = 0.0
+var _shown_score: int = -1
+var _had_pops: bool = false
+var _fx_dirty: bool = false
+var _prewarm_pending: bool = false
+var _returning_slot: int = -1
+# True while a delayed dialog (the result) waits for its entrance. It stays
+# hidden, and so unpainted, until then, keeping that paint out of the clear
+# animation's frames.
+var _overlay_waiting: bool = false
+var _slot_pieces: Array = [{}, {}, {}]
+var _preview_key: Array = []
+var _preview: Dictionary = {}
+var _tweens: Dictionary = {}
+
 func _ready() -> void:
 	font = ThemeDB.fallback_font
 	var heavy = FontVariation.new()
@@ -99,6 +146,10 @@ func _ready() -> void:
 	effects = Effects.new()
 	sfx = Sfx.new()
 	add_child(sfx)
+	# From the project setting, not the live flag: an earlier scene may have
+	# left it lifted mid-animation.
+	_low_power_default = ProjectSettings.get_setting("application/run/low_processor_mode", true)
+	build_layers()
 	settings = Settings.new()
 	settings.from_dict(Store.read(settings_path))
 	profile = Profile.new()
@@ -115,9 +166,181 @@ func _ready() -> void:
 	set_end_notice()
 	get_tree().auto_accept_quit = false
 	set_process(false)
-	queue_redraw()
+	update_layout()
+	refresh_view()
+	# Warm the font cache once the first frame is on screen.
+	get_tree().create_timer(0.3).timeout.connect(func():
+		_prewarm_pending = true
+		chrome_layer.queue_redraw())
+
+func make_layer(parent: Node, layer_name: String, painter: Callable) -> Node2D:
+	var layer = Node2D.new()
+	layer.name = layer_name
+	perf[layer_name] = [0, 0]
+	layer.draw.connect(func(): paint(layer, layer_name, painter))
+	parent.add_child(layer)
+	return layer
+
+func paint(layer: Node2D, layer_name: String, painter: Callable) -> void:
+	var start: int = Time.get_ticks_usec()
+	canvas = layer
+	painter.call()
+	perf[layer_name][0] += 1
+	perf[layer_name][1] += Time.get_ticks_usec() - start
+
+func build_layers() -> void:
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content = Node2D.new()
+	content.name = "Content"
+	add_child(content)
+	chrome_layer = make_layer(content, "chrome", paint_chrome)
+	board_layer = make_layer(content, "board", paint_board)
+	preview_layer = make_layer(content, "preview", paint_preview)
+	hud_layer = make_layer(content, "hud", paint_hud)
+	score_layer = make_layer(content, "score", paint_score)
+	for slot in range(3):
+		var layer: Node2D = make_layer(content, "slot%d" % slot, paint_slot.bind(slot))
+		layer.position = tray_rect(slot).get_center()
+		slot_layers.append(layer)
+	fx_layer = make_layer(content, "fx", paint_fx)
+	drag_layer = make_layer(content, "drag", paint_drag)
+	drag_layer.visible = false
+	overlay_root = Node2D.new()
+	overlay_root.name = "Overlay"
+	add_child(overlay_root)
+	overlay_layer = make_layer(overlay_root, "overlay", paint_overlay)
+	overlay_layer.visible = false
+
+## Total repaint passes so far for the named layers (all layers if empty).
+func draw_passes(names: Array = []) -> int:
+	var total: int = 0
+	for key in perf:
+		if names.is_empty() or names.has(key):
+			total += perf[key][0]
+	return total
+
+## Repaints every layer whose content may have changed after a command.
+## Called once per tap or command, never per frame.
+func refresh_view() -> void:
+	_preview_key = []
+	var playing_route: bool = route == PLAY
+	board_layer.visible = playing_route
+	preview_layer.visible = playing_route
+	score_layer.visible = playing_route
+	fx_layer.visible = playing_route
+	for layer in slot_layers:
+		# Hidden layers skip painting, so repaint slots when they reappear.
+		if playing_route and not layer.visible:
+			layer.queue_redraw()
+		layer.visible = playing_route
+	if not playing_route or (not dragging and _returning_slot < 0):
+		drag_layer.visible = false
+	overlay_layer.visible = not dialogs.is_empty() and not _overlay_waiting
+	chrome_layer.queue_redraw()
+	board_layer.queue_redraw()
+	preview_layer.queue_redraw()
+	hud_layer.queue_redraw()
+	score_layer.queue_redraw()
+	overlay_layer.queue_redraw()
+	refresh_slots()
+	_shown_score = int(display_score)
+
+## Repaints a tray slot only when its shard changes, and animates new shards in.
+func refresh_slots() -> void:
+	for slot in range(3):
+		var piece: Dictionary = round_state.tray[slot]
+		var layer: Node2D = slot_layers[slot]
+		if piece == _slot_pieces[slot]:
+			continue
+		_slot_pieces[slot] = piece.duplicate()
+		layer.queue_redraw()
+		if piece.is_empty() or route != PLAY or settings.get_value("reduced_motion"):
+			stop_tween("slot%d" % slot)
+			layer.scale = Vector2.ONE
+			layer.modulate.a = 1.0
+			continue
+		layer.scale = Vector2.ONE * 0.55
+		layer.modulate.a = 0.0
+		var tween: Tween = restart_tween("slot%d" % slot)
+		tween.set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tween.tween_property(layer, "scale", Vector2.ONE, 0.26).set_delay(slot * 0.06)
+		tween.tween_property(layer, "modulate:a", 1.0, 0.16).set_delay(slot * 0.06)
+		boost(0.3 + slot * 0.06)
+	update_slot_states()
+
+## Dims shards that are being dragged, flying home or have no room. Uses
+## self_modulate so it combines with the refill fade on modulate.
+func update_slot_states() -> void:
+	for slot in range(3):
+		var layer: Node2D = slot_layers[slot]
+		var dim: float = 1.0
+		var lifted: float = 0.0
+		if (dragging and selected == slot) or _returning_slot == slot:
+			dim = 0.25
+		elif not _fits[slot] and round_state.status == Model.PLAYING:
+			dim = 0.35
+			lifted = 6.0
+		layer.self_modulate.a = dim
+		layer.position = tray_rect(slot).get_center() - Vector2(0, lifted)
+
+## Stops the named animation, if running, so a new one can take over.
+func stop_tween(key: String) -> void:
+	if _tweens.has(key):
+		if _tweens[key].is_valid():
+			_tweens[key].kill()
+		_tweens.erase(key)
+
+func restart_tween(key: String) -> Tween:
+	stop_tween(key)
+	var tween: Tween = create_tween()
+	_tweens[key] = tween
+	return tween
+
+## Keeps frames flowing at full rate for `seconds` of tween-driven motion.
+func boost(seconds: float) -> void:
+	_boost_until = maxf(_boost_until, effects.time + seconds)
+	start_animation()
+
+## Fades and slides the whole screen in after Home <-> Play navigation.
+func play_screen_transition() -> void:
+	content.modulate.a = 0.0
+	_content_slide = 0.0 if settings.get_value("reduced_motion") else 22.0
+	place_content()
+	var tween: Tween = restart_tween("screen")
+	tween.set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(content, "modulate:a", 1.0, SCREEN_FADE)
+	tween.tween_method(set_content_slide, _content_slide, 0.0, SCREEN_FADE)
+	boost(SCREEN_FADE + 0.05)
+
+func set_content_slide(value: float) -> void:
+	_content_slide = value
+	place_content()
+
+## Fades and lifts the top dialog in, after the result screen's short delay.
+func play_dialog_entrance() -> void:
+	overlay_layer.modulate.a = 0.0
+	overlay_layer.position = Vector2(0, 0 if settings.get_value("reduced_motion") else 26)
+	var tween: Tween = restart_tween("dialog")
+	tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_overlay_waiting = result_delay > 0.0
+	overlay_layer.visible = not _overlay_waiting
+	if _overlay_waiting:
+		tween.tween_interval(result_delay)
+		tween.tween_callback(reveal_overlay)
+	tween.tween_property(overlay_layer, "modulate:a", 1.0, DIALOG_FADE)
+	tween.parallel().tween_property(overlay_layer, "position", Vector2.ZERO, DIALOG_FADE + 0.04)
+	boost(result_delay + DIALOG_FADE + 0.1)
+
+func reveal_overlay() -> void:
+	_overlay_waiting = false
+	overlay_layer.visible = not dialogs.is_empty()
+	overlay_layer.queue_redraw()
+	hud_layer.queue_redraw()
 
 # ---------------------------------------------------------------- lifecycle
+
+func _exit_tree() -> void:
+	OS.low_processor_usage_mode = _low_power_default
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
@@ -125,17 +348,22 @@ func _notification(what: int) -> void:
 		get_tree().quit()
 	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		handle_back()
+	elif round_state == null:
+		return
 	elif what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		cancel_gesture()
 		save_round()
 		if what == NOTIFICATION_APPLICATION_PAUSED and route == PLAY and dialogs.is_empty() and round_state.status == Model.PLAYING:
 			open_dialog("pause")
-		queue_redraw()
+		refresh_view()
 	elif what == NOTIFICATION_RESIZED:
 		cancel_gesture()
-		queue_redraw()
+		update_layout()
+		refresh_view()
 	elif what == NOTIFICATION_APPLICATION_RESUMED or what == NOTIFICATION_APPLICATION_FOCUS_IN:
-		queue_redraw()
+		# Safe areas can change while the app is away (rotation, cutout mode).
+		update_layout()
+		refresh_view()
 
 ## Android Back: cancel a gesture or selection, then close the top dialog, then
 ## pause gameplay, and finally ask before leaving from the home screen.
@@ -155,8 +383,10 @@ func handle_back() -> void:
 		open_dialog("pause")
 	else:
 		open_dialog("confirm_exit")
-	queue_redraw()
+	refresh_view()
 
+## Runs only while something moves. Each frame repaints just the effects layer
+## and, when the shown number changes, the score; everything else is moved.
 func _process(delta: float) -> void:
 	effects.update(delta)
 	var target: float = round_state.score
@@ -164,15 +394,34 @@ func _process(delta: float) -> void:
 		display_score = target
 	else:
 		display_score = move_toward(display_score, target, maxf(absf(target - display_score) * delta * 9.0, 60.0 * delta))
-	queue_redraw()
-	if not is_animating():
+	if int(display_score) != _shown_score:
+		_shown_score = int(display_score)
+		score_layer.queue_redraw()
+	var shake: Vector2 = effects.shake_offset()
+	board_layer.position = shake
+	preview_layer.position = shake
+	fx_layer.position = shake
+	var has_pops: bool = not effects.pops.is_empty()
+	if _had_pops and not has_pops:
+		board_layer.queue_redraw()
+	_had_pops = has_pops
+	var fx_active: bool = effects.active()
+	if fx_active or _fx_dirty:
+		fx_layer.queue_redraw()
+	_fx_dirty = fx_active
+	if not is_animating() and not dragging:
 		set_process(false)
+		OS.low_processor_usage_mode = _low_power_default
 
 func is_animating() -> bool:
-	return effects.active() or display_score != round_state.score \
+	return effects.active() or display_score != round_state.score or effects.time < _boost_until \
 		or (not dialogs.is_empty() and effects.time - dialog_opened_at < result_delay + 0.3)
 
+## Low-processor mode sleeps a little every frame to save battery. That suits
+## a still board but costs smoothness, so it is lifted while anything animates
+## or a finger drags, and restored as soon as everything is still.
 func start_animation() -> void:
+	OS.low_processor_usage_mode = false
 	set_process(true)
 
 func apply_settings() -> void:
@@ -188,22 +437,34 @@ func open_dialog(id: String) -> void:
 	result_delay = 0.0
 	if id == "result" and not settings.get_value("reduced_motion"):
 		result_delay = 0.8
-	start_animation()
+	overlay_layer.queue_redraw()
+	play_dialog_entrance()
 
 func close_dialog() -> void:
 	if not dialogs.is_empty():
 		dialogs.pop_back()
+	# The dialog beneath, if any, is already in place: show it without a replay.
+	stop_tween("dialog")
+	_overlay_waiting = false
+	overlay_layer.modulate.a = 1.0
+	overlay_layer.position = Vector2.ZERO
+	overlay_layer.visible = not dialogs.is_empty()
+	overlay_layer.queue_redraw()
 
 func go_home() -> void:
 	cancel_gesture()
 	selected = -1
 	dialogs.clear()
+	close_dialog()
 	save_round()
 	route = HOME
-	queue_redraw()
+	play_screen_transition()
+	refresh_view()
 
 func enter_play() -> void:
-	route = PLAY
+	if route != PLAY:
+		route = PLAY
+		play_screen_transition()
 	reset_notice()
 	set_end_notice()
 	if not profile.seen_tutorial:
@@ -243,7 +504,7 @@ func activate(id: String) -> void:
 		settings.toggle(id.substr(7))
 		apply_settings()
 		save_settings()
-		queue_redraw()
+		refresh_view()
 		return
 	match id:
 		"continue":
@@ -257,11 +518,13 @@ func activate(id: String) -> void:
 				open_dialog("confirm_new")
 			else:
 				dialogs.clear()
+				close_dialog()
 				start_new_round()
 				enter_play()
 		"confirm_new", "next":
 			abandon_round()
 			dialogs.clear()
+			close_dialog()
 			start_new_round()
 			enter_play()
 		"pause":
@@ -288,7 +551,7 @@ func activate(id: String) -> void:
 			get_tree().quit()
 		"resume", "cancel", "done":
 			close_dialog()
-	queue_redraw()
+	refresh_view()
 
 # ---------------------------------------------------------------- game commands
 
@@ -305,6 +568,7 @@ func commit_place(slot: int, cell: Vector2i) -> bool:
 	refresh_derived()
 	play_move_feedback(result, before)
 	after_command()
+	refresh_view()
 	return true
 
 func reroll() -> void:
@@ -316,6 +580,7 @@ func reroll() -> void:
 		save_round()
 		refresh_derived()
 		after_command()
+		refresh_view()
 
 ## Runs after every committed command: records a finished round exactly once
 ## and shows its result.
@@ -349,6 +614,7 @@ func play_move_feedback(result: Dictionary, before: Array) -> void:
 	var lines: int = int(result.lines)
 	var survivors: Array = placed.filter(func(i): return not cleared.has(i))
 	effects.add_pop(survivors)
+	_had_pops = not effects.pops.is_empty()
 	for index in cleared:
 		var element: int = int(before[index]) if int(before[index]) != 0 else int(result.element)
 		effects.add_clear(index, element, cell_rect(index).get_center(), COLORS[element])
@@ -378,6 +644,8 @@ func play_move_feedback(result: Dictionary, before: Array) -> void:
 		notice = "+%d altitude  /  %d %s" % [result.points, lines, "line" if lines == 1 else "lines"]
 	else:
 		notice = "+%d altitude" % result.points
+	_fx_dirty = true
+	fx_layer.queue_redraw()
 	start_animation()
 
 ## Recomputes which tray pieces still fit, and the blocked-tray hint.
@@ -399,8 +667,9 @@ func set_end_notice() -> void:
 
 # ---------------------------------------------------------------- input
 
+## Layout is cached and updated on resize/resume, so pointer events never
+## query the display (a JNI round trip on Android) per motion event.
 func to_reference(point: Vector2) -> Vector2:
-	update_layout()
 	return (point - layout_offset) / layout_scale
 
 func _input(event: InputEvent) -> void:
@@ -427,6 +696,7 @@ func pointer_pressed(point: Vector2) -> void:
 		if hit.get("enabled", true) and dialog_ready():
 			press_kind = "button"
 			press_id = hit.id
+			repaint_controls()
 		return
 	if not dialogs.is_empty() or route != PLAY or round_state.status != Model.PLAYING:
 		return
@@ -447,13 +717,13 @@ func pointer_moved(point: Vector2, held: bool) -> void:
 		return
 	if press_kind == "slot":
 		if not dragging and point.distance_to(press_pos) > DRAG_THRESHOLD:
-			dragging = true
-			selected = press_slot
-			sfx.play("select")
+			begin_drag(point)
 		if dragging:
+			# Moving the finger only moves the drag layer; the board and the
+			# score hint repaint just when the snapped cell changes.
 			drag_point = point
-			hover_cell = drag_anchor(press_slot, point)
-			queue_redraw()
+			drag_layer.position = point
+			set_hover(drag_anchor(press_slot, point))
 	elif press_kind == "board":
 		set_hover(board_cell(point) if BOARD_RECT.has_point(point) else Vector2i(-1, -1))
 
@@ -471,11 +741,14 @@ func pointer_released(point: Vector2) -> void:
 		if dragging:
 			dragging = false
 			var cell: Vector2i = drag_anchor(press_slot, point)
-			if not round_state.can_place(round_state.tray[press_slot], cell.x, cell.y) or not commit_place(press_slot, cell):
+			if round_state.can_place(round_state.tray[press_slot], cell.x, cell.y) and commit_place(press_slot, cell):
+				drag_layer.visible = false
+			else:
 				selected = -1
 				hover_cell = Vector2i(-1, -1)
 				notice = "No room there. The shard is back in your tray."
 				sfx.play("invalid")
+				return_drag_to_tray(press_slot)
 		elif selected == press_slot:
 			selected = -1
 			reset_notice()
@@ -488,21 +761,80 @@ func pointer_released(point: Vector2) -> void:
 		if BOARD_RECT.has_point(point):
 			commit_place(selected, board_cell(point))
 		hover_cell = Vector2i(-1, -1)
-	queue_redraw()
+	refresh_view()
+
+## Lifts a tray shard under the finger: it grows from tray size to board size
+## as it rises above the finger.
+func begin_drag(point: Vector2) -> void:
+	dragging = true
+	selected = press_slot
+	drag_point = point
+	sfx.play("select")
+	_returning_slot = -1
+	drag_layer.position = point
+	drag_layer.modulate.a = 1.0
+	drag_layer.visible = true
+	drag_layer.queue_redraw()
+	start_animation()
+	stop_tween("drag")
+	if settings.get_value("reduced_motion"):
+		drag_layer.scale = Vector2.ONE
+	else:
+		drag_layer.scale = Vector2.ONE * tray_pitch(round_state.tray[press_slot]) / CELL
+		var tween: Tween = restart_tween("drag")
+		tween.tween_property(drag_layer, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	update_slot_states()
+	hud_layer.queue_redraw()
+
+## Flies a released, unplaceable shard back into its tray slot.
+func return_drag_to_tray(slot: int) -> void:
+	if settings.get_value("reduced_motion") or not drag_layer.visible:
+		stop_tween("drag")
+		drag_layer.visible = false
+		return
+	_returning_slot = slot
+	var tray_scale: float = tray_pitch(round_state.tray[slot]) / CELL
+	# The layer draws the shard DRAG_LIFT above its origin, scaled with it.
+	var target: Vector2 = tray_rect(slot).get_center() + Vector2(0, DRAG_LIFT * tray_scale)
+	var tween: Tween = restart_tween("drag")
+	tween.set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(drag_layer, "position", target, 0.18)
+	tween.tween_property(drag_layer, "scale", Vector2.ONE * tray_scale, 0.18)
+	tween.chain().tween_callback(finish_drag_return)
+	boost(0.25)
+
+func finish_drag_return() -> void:
+	drag_layer.visible = false
+	_returning_slot = -1
+	update_slot_states()
 
 ## Cancels an in-progress gesture without consuming a piece.
 func cancel_gesture() -> void:
 	if dragging:
 		selected = -1
+		stop_tween("drag")
+		drag_layer.visible = false
 	pointer_down = false
 	press_kind = ""
 	dragging = false
 	hover_cell = Vector2i(-1, -1)
+	if _returning_slot >= 0:
+		stop_tween("drag")
+		finish_drag_return()
+	update_slot_states()
 
 func set_hover(cell: Vector2i) -> void:
 	if cell != hover_cell:
 		hover_cell = cell
-		queue_redraw()
+		preview_layer.queue_redraw()
+		score_layer.queue_redraw()
+
+## Repaints whichever layer holds the visible buttons (press feedback).
+func repaint_controls() -> void:
+	if dialogs.is_empty():
+		hud_layer.queue_redraw()
+	else:
+		overlay_layer.queue_redraw()
 
 func dialog_ready() -> bool:
 	return dialogs.is_empty() or effects.time - dialog_opened_at >= result_delay
@@ -523,6 +855,11 @@ func piece_extent(piece: Dictionary) -> Vector2i:
 	for cell in round_state.shapes[int(piece.shape)].cells:
 		extent = extent.max(cell + Vector2i.ONE)
 	return extent
+
+## Cell pitch for a shard shown in a tray slot.
+func tray_pitch(piece: Dictionary) -> float:
+	var extent: Vector2i = piece_extent(piece)
+	return minf(TRAY_PITCH_MAX, 130.0 / maxi(extent.x, extent.y))
 
 ## The board cell under a dragged shard's top-left corner. The shard floats
 ## above the finger so the finger never hides where it will land.
@@ -549,6 +886,9 @@ func make_button(id: String, rect: Rect2, label: String, kind: String = "ghost",
 func current_buttons() -> Array:
 	if not dialogs.is_empty():
 		return dialog_buttons(dialogs.back())
+	return screen_buttons()
+
+func screen_buttons() -> Array:
 	if route == HOME:
 		var list: Array = []
 		if can_continue():
@@ -618,8 +958,10 @@ func button_at(point: Vector2) -> Dictionary:
 			return entry
 	return {}
 
-# ---------------------------------------------------------------- drawing helpers
+# ---------------------------------------------------------------- layout
 
+## Fits the 720x1280 reference layout into the Android safe area. Only runs on
+## start, resize and resume; the result is applied as layer transforms.
 func update_layout() -> void:
 	var safe = Rect2(Vector2.ZERO, size)
 	if OS.get_name() == "Android":
@@ -628,11 +970,28 @@ func update_layout() -> void:
 		if physical.x > 0 and physical.y > 0:
 			var conversion = size / physical
 			safe = Rect2(Vector2(area.position) * conversion, Vector2(area.size) * conversion)
+	if safe.size.x <= 0 or safe.size.y <= 0:
+		safe = Rect2(Vector2.ZERO, Vector2(720, 1280))
 	layout_scale = minf(safe.size.x / 720.0, safe.size.y / 1280.0)
-	layout_offset = safe.position + (safe.size - Vector2(720, 1280) * layout_scale) * 0.5
+	# Centre horizontally. On screens taller than 9:16, sit a little low so
+	# the tray and buttons are nearer the thumb, while keeping some room above
+	# the system's bottom-edge gesture area.
+	var spare: Vector2 = safe.size - Vector2(720, 1280) * layout_scale
+	layout_offset = safe.position + Vector2(spare.x * 0.5, spare.y * 0.65)
+	place_content()
+	overlay_root.position = layout_offset
+	overlay_root.scale = Vector2.ONE * layout_scale
+	queue_redraw()
+
+func place_content() -> void:
+	content.position = layout_offset + Vector2(0, _content_slide * layout_scale)
+	content.scale = Vector2.ONE * layout_scale
+
+# ---------------------------------------------------------------- drawing helpers
+# All helpers draw on `canvas`, the layer currently being painted.
 
 func label_at(text: String, point: Vector2, font_size: int, color: Color = CREAM, heavy: bool = false) -> void:
-	draw_string(bold if heavy else font, point, text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+	canvas.draw_string(bold if heavy else font, point, text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
 
 func text_width(text: String, font_size: int, heavy: bool = false) -> float:
 	return (bold if heavy else font).get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
@@ -644,17 +1003,19 @@ func right_aligned(text: String, right: float, baseline: float, font_size: int, 
 	label_at(text, Vector2(right - text_width(text, font_size, heavy), baseline), font_size, color, heavy)
 
 func wrapped(text: String, origin: Vector2, width: float, font_size: int, color: Color = CREAM) -> float:
-	draw_multiline_string(font, origin + Vector2(0, font_size), text, HORIZONTAL_ALIGNMENT_LEFT, width, font_size, -1, color)
+	canvas.draw_multiline_string(font, origin + Vector2(0, font_size), text, HORIZONTAL_ALIGNMENT_LEFT, width, font_size, -1, color)
 	return font.get_multiline_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, width, font_size).y
 
 func panel(color: Color, radius: int, border_color: Color = Color.TRANSPARENT, border: int = 0) -> StyleBoxFlat:
 	# Reuse immutable drawing resources instead of allocating a style per tile
-	# on every frame. Alpha is quantized so fades reuse a bounded set.
+	# on every frame. Alpha is quantized so fades reuse a bounded set, and the
+	# key is a value type so lookups do not build strings.
 	color.a = snappedf(color.a, 0.0625)
 	border_color.a = snappedf(border_color.a, 0.0625)
-	var key: String = "%d:%d:%d:%d" % [color.to_rgba32(), radius, border_color.to_rgba32(), border]
-	if _style_cache.has(key):
-		return _style_cache[key]
+	var key = Vector4i(color.to_rgba32(), radius, border_color.to_rgba32(), border)
+	var cached = _style_cache.get(key)
+	if cached != null:
+		return cached
 	var style = StyleBoxFlat.new()
 	style.bg_color = color
 	style.set_corner_radius_all(radius)
@@ -672,11 +1033,11 @@ func tile_at(rect: Rect2, element: int, alpha: float = 1.0, grow_scale: float = 
 	if grow_scale != 1.0:
 		rect = rect.grow(rect.size.x * (grow_scale - 1.0) * 0.5)
 	var radius: int = 10 if rect.size.x > 40 else 5
-	draw_style_box(panel(with_alpha(COLORS[element], alpha), radius), rect)
+	canvas.draw_style_box(panel(with_alpha(COLORS[element], alpha), radius), rect)
 	if element == 0:
 		return
 	# A soft top highlight gives each shard a little depth.
-	draw_style_box(panel(Color(1, 1, 1, 0.2 * alpha), radius), Rect2(rect.position + Vector2(4, 3), Vector2(rect.size.x - 8, rect.size.y * 0.3)))
+	canvas.draw_style_box(panel(Color(1, 1, 1, 0.2 * alpha), radius), Rect2(rect.position + Vector2(4, 3), Vector2(rect.size.x - 8, rect.size.y * 0.3)))
 	var symbol_size: int = maxi(14, int(rect.size.y / grow_scale * 0.45))
 	centered(SYMBOLS[element], rect, symbol_size, with_alpha(INK, alpha), true)
 
@@ -695,179 +1056,36 @@ func draw_button(entry: Dictionary) -> void:
 	var kind: String = entry.kind if enabled else "disabled"
 	match kind:
 		"primary":
-			draw_style_box(panel(CREAM, 18), rect)
+			canvas.draw_style_box(panel(CREAM.darkened(0.08) if pressed else CREAM, 18), rect)
 			centered(entry.label, rect if not entry.has("sub") else Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.62)), 28, INK, true)
 			if entry.has("sub"):
 				centered(entry.sub, Rect2(rect.position + Vector2(0, rect.size.y * 0.5), Vector2(rect.size.x, rect.size.y * 0.42)), 20, EDGE)
 		"secondary":
-			draw_style_box(panel(EDGE, 18, GOLD, 2), rect)
+			canvas.draw_style_box(panel(EDGE, 18, GOLD, 2), rect)
 			centered(entry.label, rect, 26, GOLD, true)
 		"danger":
-			draw_style_box(panel(Color("3a3436"), 18, CORAL, 2), rect)
+			canvas.draw_style_box(panel(Color("3a3436"), 18, CORAL, 2), rect)
 			centered(entry.label, rect, 24, CORAL, true)
 		"disabled":
-			draw_style_box(panel(Color("213c40"), 18, with_alpha(MUTED, 0.5), 1), rect)
+			canvas.draw_style_box(panel(Color("213c40"), 18, with_alpha(MUTED, 0.5), 1), rect)
 			centered(entry.label, rect, 26, MUTED, true)
 		"icon":
 			rect = rect.grow(-8)
-			draw_style_box(panel(CARD, 20, EDGE, 2), rect)
+			canvas.draw_style_box(panel(CARD, 20, EDGE, 2), rect)
 			var c: Vector2 = rect.get_center()
-			draw_style_box(panel(CREAM, 3), Rect2(c + Vector2(-14, -16), Vector2(9, 32)))
-			draw_style_box(panel(CREAM, 3), Rect2(c + Vector2(5, -16), Vector2(9, 32)))
+			canvas.draw_style_box(panel(CREAM, 3), Rect2(c + Vector2(-14, -16), Vector2(9, 32)))
+			canvas.draw_style_box(panel(CREAM, 3), Rect2(c + Vector2(5, -16), Vector2(9, 32)))
 		"toggle":
-			draw_style_box(panel(DEEP, 16), rect)
+			canvas.draw_style_box(panel(DEEP, 16), rect)
 			label_at(entry.label, rect.position + Vector2(24, 46), 27, CREAM, true)
 			label_at(entry.sub, rect.position + Vector2(24, 84), 19, MUTED)
 			var track = Rect2(rect.end.x - 112, rect.get_center().y - 22, 88, 44)
-			draw_style_box(panel(GOLD if entry.value else EDGE, 22), track)
+			canvas.draw_style_box(panel(GOLD if entry.value else EDGE, 22), track)
 			var knob_x: float = track.end.x - 40 if entry.value else track.position.x + 4
-			draw_style_box(panel(CREAM if entry.value else MUTED, 18), Rect2(knob_x, track.position.y + 4, 36, 36))
+			canvas.draw_style_box(panel(CREAM if entry.value else MUTED, 18), Rect2(knob_x, track.position.y + 4, 36, 36))
 		_:
-			draw_style_box(panel(CARD, 18, EDGE, 2), rect)
+			canvas.draw_style_box(panel(CARD, 18, EDGE, 2), rect)
 			centered(entry.label, rect, 25, CREAM, true)
-
-# ---------------------------------------------------------------- screens
-
-func _draw() -> void:
-	if round_state == null or font == null:
-		return
-	update_layout()
-	draw_rect(Rect2(Vector2.ZERO, size), INK)
-	draw_set_transform(layout_offset, 0, Vector2.ONE * layout_scale)
-	if route == HOME:
-		draw_home()
-	else:
-		draw_play()
-	if dialogs.is_empty():
-		for entry in current_buttons():
-			draw_button(entry)
-	else:
-		draw_dialog(dialogs.back())
-	draw_set_transform(Vector2.ZERO)
-
-func draw_mountains(base_y: float, scale_y: float) -> void:
-	var far = PackedVector2Array([Vector2(-20, base_y), Vector2(90, base_y - 150 * scale_y), Vector2(200, base_y - 70 * scale_y),
-		Vector2(330, base_y - 230 * scale_y), Vector2(470, base_y - 110 * scale_y), Vector2(600, base_y - 200 * scale_y), Vector2(740, base_y - 60 * scale_y), Vector2(740, base_y)])
-	draw_colored_polygon(far, Color("1f4245"))
-	var peak = Vector2(420, base_y - 330 * scale_y)
-	var near = PackedVector2Array([Vector2(-20, base_y + 40), Vector2(160, base_y - 120 * scale_y), Vector2(260, base_y - 60 * scale_y),
-		peak, Vector2(560, base_y - 150 * scale_y), Vector2(640, base_y - 100 * scale_y), Vector2(740, base_y - 10 * scale_y), Vector2(740, base_y + 40)])
-	draw_colored_polygon(near, Color("2b5356"))
-	var cap: float = 70 * scale_y
-	draw_colored_polygon(PackedVector2Array([peak, peak + Vector2(cap * 0.85, cap), peak + Vector2(cap * 0.35, cap * 0.78),
-		peak + Vector2(0, cap * 1.05), peak + Vector2(-cap * 0.45, cap * 0.8), peak + Vector2(-cap * 0.95, cap)]), CREAM.darkened(0.08))
-
-func draw_home() -> void:
-	for star in STARS:
-		draw_rect(Rect2(star, Vector2(4, 4)), with_alpha(CREAM, 0.55))
-	draw_circle(Vector2(590, 150), 46, Color("e9dfb9"))
-	draw_circle(Vector2(610, 138), 42, INK)
-	draw_mountains(540, 1.0)
-	draw_rect(Rect2(0, 560, 720, 720), Color("1d3f43"))
-	draw_colored_polygon(PackedVector2Array([Vector2(0, 540), Vector2(720, 520), Vector2(720, 600), Vector2(0, 600)]), Color("1d3f43"))
-	centered("SUMMIT SHARDS", Rect2(0, 586, 720, 70), 64, CREAM, true)
-	centered("A little higher.", Rect2(0, 652, 720, 44), 28, GOLD)
-	var stats_rect = Rect2(80, 704, 560, 104)
-	draw_style_box(panel(CARD, 20, EDGE, 1), stats_rect)
-	var stats = [["BEST", str(profile.best_score)], ["SUMMITS", str(profile.rounds_won)],
-		["PLAYED", str(profile.rounds_played)], ["STREAK", str(profile.win_streak)]]
-	for i in range(stats.size()):
-		var column = Rect2(stats_rect.position.x + i * 140, stats_rect.position.y, 140, stats_rect.size.y)
-		centered(stats[i][1], Rect2(column.position + Vector2(0, 8), Vector2(column.size.x, 56)), 36, CREAM, true)
-		centered(stats[i][0], Rect2(column.position + Vector2(0, 60), Vector2(column.size.x, 30)), 18, MUTED)
-	centered("v%s  -  plays fully offline" % ProjectSettings.get_setting("application/config/version", ""), Rect2(0, 1196, 720, 40), 18, with_alpha(MUTED, 0.7))
-
-func draw_play() -> void:
-	var playing: bool = round_state.status == Model.PLAYING
-	draw_colored_polygon(PackedVector2Array([Vector2(330, 116), Vector2(455, 22), Vector2(590, 116)]), Color("264b4e"))
-	draw_colored_polygon(PackedVector2Array([Vector2(433, 39), Vector2(455, 22), Vector2(479, 40), Vector2(456, 34)]), CREAM.darkened(0.18))
-	label_at("SUMMIT SHARDS", Vector2(40, 62), 24, GOLD, true)
-	label_at("FLOOR 01  /  TRAIL", Vector2(40, 100), 22, MUTED)
-	# Score card.
-	var card = Rect2(40, 124, 640, 182)
-	draw_style_box(panel(CARD, 18), card)
-	label_at("ALTITUDE", Vector2(64, 164), 20, MUTED)
-	var shown: String = str(int(display_score))
-	label_at(shown, Vector2(64, 232), 60, CREAM, true)
-	label_at("/ %d" % round_state.target, Vector2(76 + text_width(shown, 60, true), 230), 26, MUTED)
-	right_aligned("BEST %d" % profile.best_score, 656, 164, 20, MUTED)
-	right_aligned("TRAY %d / %d" % [round_state.trays_dealt, round_state.max_trays], 656, 204, 22, CREAM, true)
-	for i in range(round_state.max_trays):
-		var pip = Rect2(656 - (round_state.max_trays - i) * 22 + 4, 218, 14, 14)
-		draw_style_box(panel(GOLD if i < round_state.trays_dealt else EDGE, 7), pip)
-	if round_state.streak > 0 and playing:
-		var chip_text: String = "STREAK x%d" % round_state.streak
-		var chip = Rect2(318, 140, text_width(chip_text, 18, true) + 28, 34)
-		draw_style_box(panel(with_alpha(GOLD, 0.18), 17, GOLD, 1), chip)
-		centered(chip_text, chip, 18, GOLD, true)
-	var bar = Rect2(64, 264, 592, 14)
-	draw_style_box(panel(EDGE, 7), bar)
-	var preview: Dictionary = current_preview()
-	var progress: float = clampf(display_score / round_state.target, 0, 1)
-	if not preview.is_empty():
-		var projected: float = clampf(float(round_state.score + int(preview.points)) / round_state.target, 0, 1)
-		draw_style_box(panel(with_alpha(GOLD, 0.4), 7), Rect2(bar.position, Vector2(bar.size.x * projected, bar.size.y)))
-	if progress > 0:
-		draw_style_box(panel(GOLD, 7), Rect2(bar.position, Vector2(maxf(14, bar.size.x * progress), bar.size.y)))
-	draw_board(preview)
-	# Hint line.
-	if not preview.is_empty():
-		var lines: int = int(preview.lines)
-		centered("+%d altitude%s" % [preview.points, "" if lines == 0 else "  /  %d %s" % [lines, "line" if lines == 1 else "lines"]], HINT_RECT, 27, GOLD, true)
-	else:
-		centered(notice, HINT_RECT, 23, GOLD if not playing else MUTED)
-	draw_tray()
-	if dragging and selected >= 0:
-		draw_drag_ghost()
-
-## The selected shard's placement at the hovered cell, if it is legal.
-func current_preview() -> Dictionary:
-	if selected < 0 or hover_cell.x < 0 or round_state.status != Model.PLAYING:
-		return {}
-	var piece: Dictionary = round_state.tray[selected]
-	if not round_state.can_place(piece, hover_cell.x, hover_cell.y):
-		return {}
-	var result: Dictionary = round_state.preview(piece, hover_cell.x, hover_cell.y)
-	result.cells = round_state.piece_cells(piece, hover_cell.x, hover_cell.y)
-	result.element = int(piece.element)
-	return result
-
-func draw_board(preview: Dictionary) -> void:
-	var shake: Vector2 = effects.shake_offset()
-	draw_set_transform(layout_offset + shake * layout_scale, 0, Vector2.ONE * layout_scale)
-	draw_style_box(panel(DEEP, 16), BOARD_RECT.grow(10))
-	for index in range(64):
-		tile_at(cell_rect(index), int(round_state.board[index]), 1.0, effects.pop_scale(index))
-	if not preview.is_empty():
-		for index in preview.cells:
-			tile_at(cell_rect(index), preview.element, 0.55)
-		if settings.get_value("clear_preview"):
-			for index in preview.cleared:
-				draw_style_box(panel(with_alpha(GOLD, 0.16), 10, GOLD, 3), cell_rect(index).grow(1))
-	elif selected >= 0 and hover_cell.x >= 0 and hover_cell.y >= 0 and hover_cell.x < 8 and hover_cell.y < 8 and round_state.status == Model.PLAYING:
-		# Show where an illegal placement collides, in coral.
-		var piece: Dictionary = round_state.tray[selected]
-		for cell in round_state.shapes[int(piece.shape)].cells:
-			var p: Vector2i = hover_cell + cell
-			if p.x < 8 and p.y < 8:
-				draw_style_box(panel(with_alpha(CORAL, 0.18), 10, CORAL, 3), cell_rect(p.y * 8 + p.x))
-	for entry in effects.clears:
-		var t: float = effects.clear_progress(entry)
-		var rect: Rect2 = cell_rect(entry.index)
-		tile_at(rect, entry.element, 1.0 - t, 1.0 - 0.45 * t)
-		if t < 0.4:
-			draw_style_box(panel(Color(1, 1, 1, 0.7 * (1.0 - t / 0.4)), 10), rect)
-	for entry in effects.particles:
-		var state: Dictionary = effects.particle_state(entry)
-		draw_rect(Rect2(state.pos - Vector2.ONE * entry.size * 0.5, Vector2.ONE * entry.size), with_alpha(entry.color, state.alpha))
-	for entry in effects.texts:
-		var state: Dictionary = effects.text_state(entry)
-		var point: Vector2 = state.pos + shake
-		draw_set_transform(layout_offset + point * layout_scale, 0, Vector2.ONE * layout_scale * state.scale)
-		var width: float = text_width(entry.text, entry.size, true)
-		label_at(entry.text, Vector2(-width * 0.5 + 3, entry.size * 0.34 + 3), entry.size, Color(0, 0, 0, 0.45 * state.alpha), true)
-		label_at(entry.text, Vector2(-width * 0.5, entry.size * 0.34), entry.size, with_alpha(entry.color, state.alpha), true)
-	draw_set_transform(layout_offset, 0, Vector2.ONE * layout_scale)
 
 func draw_piece(piece: Dictionary, center: Vector2, pitch: float, alpha: float = 1.0) -> void:
 	var extent: Vector2 = Vector2(piece_extent(piece))
@@ -876,45 +1094,226 @@ func draw_piece(piece: Dictionary, center: Vector2, pitch: float, alpha: float =
 	for cell in round_state.shapes[int(piece.shape)].cells:
 		tile_at(Rect2(origin + Vector2(cell) * pitch, Vector2.ONE * (pitch - gap)), int(piece.element), alpha)
 
-func draw_tray() -> void:
+## The selected shard's placement at the hovered cell, if it is legal. Cached
+## until the selection, hovered cell or round changes.
+func current_preview() -> Dictionary:
+	if selected < 0 or hover_cell.x < 0 or round_state.status != Model.PLAYING:
+		return {}
+	var key: Array = [selected, hover_cell, round_state.seed_initial, round_state.moves, round_state.rerolls, round_state.trays_dealt]
+	if key == _preview_key:
+		return _preview
+	_preview_key = key
+	_preview = {}
+	var piece: Dictionary = round_state.tray[selected]
+	if round_state.can_place(piece, hover_cell.x, hover_cell.y):
+		_preview = round_state.preview(piece, hover_cell.x, hover_cell.y)
+		_preview.cells = round_state.piece_cells(piece, hover_cell.x, hover_cell.y)
+		_preview.element = int(piece.element)
+	return _preview
+
+# ---------------------------------------------------------------- layers
+
+## Background only; repaints on resize.
+func _draw() -> void:
+	draw_rect(Rect2(Vector2.ZERO, size), INK)
+
+## Things that change only with the screen or the profile.
+func paint_chrome() -> void:
+	if _prewarm_pending:
+		# Invisible and off-screen: only fills the glyph cache.
+		_prewarm_pending = false
+		for font_size in PREWARM_SIZES:
+			label_at(PREWARM_TEXT, Vector2(0, -400), font_size, Color(1, 1, 1, 0), true)
+	if round_state == null:
+		return
+	if route == HOME:
+		paint_home()
+		return
+	canvas.draw_colored_polygon(PackedVector2Array([Vector2(330, 116), Vector2(455, 22), Vector2(590, 116)]), Color("264b4e"))
+	canvas.draw_colored_polygon(PackedVector2Array([Vector2(433, 39), Vector2(455, 22), Vector2(479, 40), Vector2(456, 34)]), CREAM.darkened(0.18))
+	label_at("SUMMIT SHARDS", Vector2(40, 62), 24, GOLD, true)
+	label_at("FLOOR 01  /  TRAIL", Vector2(40, 100), 22, MUTED)
+	canvas.draw_style_box(panel(CARD, 18), Rect2(40, 124, 640, 182))
+	label_at("ALTITUDE", Vector2(64, 164), 20, MUTED)
+	canvas.draw_style_box(panel(EDGE, 7), Rect2(64, 264, 592, 14))
+
+func draw_mountains(base_y: float, scale_y: float) -> void:
+	# The ranges run well past the reference width so wide screens see slopes,
+	# not cut edges.
+	var far = PackedVector2Array([Vector2(-400, base_y), Vector2(-260, base_y - 120 * scale_y), Vector2(-120, base_y - 40 * scale_y),
+		Vector2(90, base_y - 150 * scale_y), Vector2(200, base_y - 70 * scale_y),
+		Vector2(330, base_y - 230 * scale_y), Vector2(470, base_y - 110 * scale_y), Vector2(600, base_y - 200 * scale_y), Vector2(740, base_y - 60 * scale_y),
+		Vector2(900, base_y - 170 * scale_y), Vector2(1120, base_y - 40 * scale_y), Vector2(1120, base_y)])
+	canvas.draw_colored_polygon(far, Color("1f4245"))
+	var peak = Vector2(420, base_y - 330 * scale_y)
+	var near = PackedVector2Array([Vector2(-400, base_y + 40), Vector2(-180, base_y - 60 * scale_y), Vector2(-20, base_y + 10),
+		Vector2(160, base_y - 120 * scale_y), Vector2(260, base_y - 60 * scale_y),
+		peak, Vector2(560, base_y - 150 * scale_y), Vector2(640, base_y - 100 * scale_y), Vector2(740, base_y - 10 * scale_y),
+		Vector2(920, base_y - 90 * scale_y), Vector2(1120, base_y + 10), Vector2(1120, base_y + 40)])
+	canvas.draw_colored_polygon(near, Color("2b5356"))
+	var cap: float = 70 * scale_y
+	canvas.draw_colored_polygon(PackedVector2Array([peak, peak + Vector2(cap * 0.85, cap), peak + Vector2(cap * 0.35, cap * 0.78),
+		peak + Vector2(0, cap * 1.05), peak + Vector2(-cap * 0.45, cap * 0.8), peak + Vector2(-cap * 0.95, cap)]), CREAM.darkened(0.08))
+
+func paint_home() -> void:
+	for star in STARS:
+		canvas.draw_rect(Rect2(star, Vector2(4, 4)), with_alpha(CREAM, 0.55))
+		# Mirror the sky beyond the sides for wide screens.
+		canvas.draw_rect(Rect2(star + Vector2(720, 40), Vector2(4, 4)), with_alpha(CREAM, 0.4))
+		canvas.draw_rect(Rect2(star - Vector2(720, -40), Vector2(4, 4)), with_alpha(CREAM, 0.4))
+	canvas.draw_circle(Vector2(590, 150), 46, Color("e9dfb9"))
+	canvas.draw_circle(Vector2(610, 138), 42, INK)
+	draw_mountains(540, 1.0)
+	# The ground runs past the reference layout so tall screens show no seam.
+	canvas.draw_rect(Rect2(-400, 560, 1520, 1600), Color("1d3f43"))
+	canvas.draw_colored_polygon(PackedVector2Array([Vector2(-400, 546), Vector2(0, 540), Vector2(720, 520), Vector2(1120, 514), Vector2(1120, 600), Vector2(-400, 600)]), Color("1d3f43"))
+	centered("SUMMIT SHARDS", Rect2(0, 586, 720, 70), 64, CREAM, true)
+	centered("A little higher.", Rect2(0, 652, 720, 44), 28, GOLD)
+	var stats_rect = Rect2(80, 704, 560, 104)
+	canvas.draw_style_box(panel(CARD, 20, EDGE, 1), stats_rect)
+	var stats = [["BEST", str(profile.best_score)], ["SUMMITS", str(profile.rounds_won)],
+		["PLAYED", str(profile.rounds_played)], ["STREAK", str(profile.win_streak)]]
+	for i in range(stats.size()):
+		var column = Rect2(stats_rect.position.x + i * 140, stats_rect.position.y, 140, stats_rect.size.y)
+		centered(stats[i][1], Rect2(column.position + Vector2(0, 8), Vector2(column.size.x, 56)), 36, CREAM, true)
+		centered(stats[i][0], Rect2(column.position + Vector2(0, 60), Vector2(column.size.x, 30)), 18, MUTED)
+	centered("v%s  -  plays fully offline" % ProjectSettings.get_setting("application/config/version", ""), Rect2(0, 1196, 720, 40), 18, with_alpha(MUTED, 0.7))
+
+## Score, progress, hint, tray cards and the screen's buttons.
+func paint_hud() -> void:
+	if round_state == null:
+		return
+	if route == PLAY:
+		paint_play_hud()
+	# Buttons stay on screen while a delayed dialog waits for its entrance.
+	if dialogs.is_empty() or _overlay_waiting:
+		for entry in screen_buttons():
+			draw_button(entry)
+
+## The counting altitude and its progress bar: the only text repainted while
+## the score animates.
+func paint_score() -> void:
+	if round_state == null or route != PLAY:
+		return
+	var shown: String = str(int(display_score))
+	label_at(shown, Vector2(64, 232), 60, CREAM, true)
+	label_at("/ %d" % round_state.target, Vector2(76 + text_width(shown, 60, true), 230), 26, MUTED)
+	var bar = Rect2(64, 264, 592, 14)
+	var preview: Dictionary = current_preview()
+	if not preview.is_empty():
+		var projected: float = clampf(float(round_state.score + int(preview.points)) / round_state.target, 0, 1)
+		canvas.draw_style_box(panel(with_alpha(GOLD, 0.4), 7), Rect2(bar.position, Vector2(bar.size.x * projected, bar.size.y)))
+	var progress: float = clampf(display_score / round_state.target, 0, 1)
+	if progress > 0:
+		canvas.draw_style_box(panel(GOLD, 7), Rect2(bar.position, Vector2(maxf(14, bar.size.x * progress), bar.size.y)))
+	if not preview.is_empty():
+		var lines: int = int(preview.lines)
+		centered("+%d altitude%s" % [preview.points, "" if lines == 0 else "  /  %d %s" % [lines, "line" if lines == 1 else "lines"]], HINT_RECT, 27, GOLD, true)
+	else:
+		centered(notice, HINT_RECT, 23, GOLD if round_state.status != Model.PLAYING else MUTED)
+
+func paint_play_hud() -> void:
+	var playing: bool = round_state.status == Model.PLAYING
+	right_aligned("BEST %d" % profile.best_score, 656, 164, 20, MUTED)
+	right_aligned("TRAY %d / %d" % [round_state.trays_dealt, round_state.max_trays], 656, 204, 22, CREAM, true)
+	for i in range(round_state.max_trays):
+		var pip = Rect2(656 - (round_state.max_trays - i) * 22 + 4, 218, 14, 14)
+		canvas.draw_style_box(panel(GOLD if i < round_state.trays_dealt else EDGE, 7), pip)
+	if round_state.streak > 0 and playing:
+		var chip_text: String = "STREAK x%d" % round_state.streak
+		var chip = Rect2(318, 140, text_width(chip_text, 18, true) + 28, 34)
+		canvas.draw_style_box(panel(with_alpha(GOLD, 0.18), 17, GOLD, 1), chip)
+		centered(chip_text, chip, 18, GOLD, true)
 	for slot in range(3):
 		var rect: Rect2 = tray_rect(slot)
-		var piece: Dictionary = round_state.tray[slot]
 		var is_selected: bool = selected == slot
-		draw_style_box(panel(Color("2b5054") if is_selected else CARD, 18, GOLD if is_selected else EDGE, 3 if is_selected else 1), rect)
-		if piece.is_empty():
+		canvas.draw_style_box(panel(Color("2b5054") if is_selected else CARD, 18, GOLD if is_selected else EDGE, 3 if is_selected else 1), rect)
+		if round_state.tray[slot].is_empty():
 			centered("PLACED", rect, 20, with_alpha(MUTED, 0.6))
-			continue
-		var extent: Vector2i = piece_extent(piece)
-		var pitch: float = minf(36.0, 130.0 / maxi(extent.x, extent.y))
-		var alpha: float = 1.0
-		if is_selected and dragging:
-			alpha = 0.25
-		elif not _fits[slot] and round_state.status == Model.PLAYING:
-			alpha = 0.35
-		draw_piece(piece, rect.get_center() - Vector2(0, 6 if not _fits[slot] else 0), pitch, alpha)
-		if not _fits[slot] and round_state.status == Model.PLAYING:
+		elif not _fits[slot] and playing:
 			centered("NO ROOM", Rect2(rect.position.x, rect.end.y - 34, rect.size.x, 26), 17, CORAL, true)
 
-func draw_drag_ghost() -> void:
-	var piece: Dictionary = round_state.tray[selected]
-	if piece.is_empty():
+## Board tiles. Repaints when a move changes the board, and once when
+## placement pops finish; never while a shard is dragged across it.
+func paint_board() -> void:
+	if round_state == null or route != PLAY:
 		return
-	# Same geometry as drag_anchor: the shard's centre floats DRAG_LIFT above the finger.
-	draw_piece(piece, drag_point - Vector2(0, DRAG_LIFT), CELL, 0.85)
+	canvas.draw_style_box(panel(DEEP, 16), BOARD_RECT.grow(10))
+	for index in range(64):
+		# Popping tiles are drawn, scaled, by the effects layer.
+		tile_at(cell_rect(index), 0 if effects.pops.has(index) else int(round_state.board[index]))
 
-func draw_dialog(id: String) -> void:
-	var alpha: float = 1.0
-	if result_delay > 0.0:
-		alpha = clampf((effects.time - dialog_opened_at - result_delay) / 0.25, 0.0, 1.0)
-	if alpha <= 0.0:
+## The ghost of the selected shard at the hovered cell, the lines it would
+## clear, or where it collides. A handful of tiles: cheap to repaint each
+## time the snapped cell changes.
+func paint_preview() -> void:
+	if round_state == null or route != PLAY:
 		return
-	var screen = Rect2(-layout_offset / layout_scale, size / layout_scale)
-	draw_rect(screen, Color(0.02, 0.07, 0.08, 0.74 * alpha))
+	var preview: Dictionary = current_preview()
+	if not preview.is_empty():
+		for index in preview.cells:
+			tile_at(cell_rect(index), preview.element, 0.55)
+		if settings.get_value("clear_preview"):
+			for index in preview.cleared:
+				canvas.draw_style_box(panel(with_alpha(GOLD, 0.16), 10, GOLD, 3), cell_rect(index).grow(1))
+	elif selected >= 0 and hover_cell.x >= 0 and hover_cell.y >= 0 and hover_cell.x < 8 and hover_cell.y < 8 and round_state.status == Model.PLAYING:
+		# Show where an illegal placement collides, in coral.
+		var piece: Dictionary = round_state.tray[selected]
+		for cell in round_state.shapes[int(piece.shape)].cells:
+			var p: Vector2i = hover_cell + cell
+			if p.x < 8 and p.y < 8:
+				canvas.draw_style_box(panel(with_alpha(CORAL, 0.18), 10, CORAL, 3), cell_rect(p.y * 8 + p.x))
+
+## One tray shard, centered on the layer's origin.
+func paint_slot(slot: int) -> void:
+	if round_state == null:
+		return
+	var piece: Dictionary = round_state.tray[slot]
+	if not piece.is_empty():
+		draw_piece(piece, Vector2.ZERO, tray_pitch(piece))
+
+## Short-lived effects; the only layer repainted every animation frame.
+func paint_fx() -> void:
+	if round_state == null:
+		return
+	for index in effects.pops:
+		tile_at(cell_rect(index), int(round_state.board[index]), 1.0, effects.pop_scale(index))
+	for entry in effects.clears:
+		var t: float = effects.clear_progress(entry)
+		var rect: Rect2 = cell_rect(entry.index)
+		tile_at(rect, entry.element, 1.0 - t, 1.0 - 0.45 * t)
+		if t < 0.4:
+			canvas.draw_style_box(panel(Color(1, 1, 1, 0.7 * (1.0 - t / 0.4)), 10), rect)
+	for entry in effects.particles:
+		var state: Dictionary = effects.particle_state(entry)
+		canvas.draw_rect(Rect2(state.pos - Vector2.ONE * entry.size * 0.5, Vector2.ONE * entry.size), with_alpha(entry.color, state.alpha))
+	for entry in effects.texts:
+		var state: Dictionary = effects.text_state(entry)
+		canvas.draw_set_transform(state.pos, 0, Vector2.ONE * state.scale)
+		var width: float = text_width(entry.text, entry.size, true)
+		label_at(entry.text, Vector2(-width * 0.5 + 3, entry.size * 0.34 + 3), entry.size, Color(0, 0, 0, 0.45 * state.alpha), true)
+		label_at(entry.text, Vector2(-width * 0.5, entry.size * 0.34), entry.size, with_alpha(entry.color, state.alpha), true)
+	canvas.draw_set_transform(Vector2.ZERO)
+
+## The dragged shard, drawn once per drag: its centre floats DRAG_LIFT above
+## the layer origin, and the layer itself follows the finger.
+func paint_drag() -> void:
+	if round_state == null or press_slot < 0 or press_slot > 2:
+		return
+	var piece: Dictionary = round_state.tray[press_slot]
+	if not piece.is_empty():
+		draw_piece(piece, Vector2(0, -DRAG_LIFT), CELL, 0.85)
+
+## The top dialog. Its fade and lift move the layer; nothing repaints.
+func paint_overlay() -> void:
+	if dialogs.is_empty() or round_state == null:
+		return
+	var id: String = dialogs.back()
+	# Oversized so the entrance lift never uncovers the screen edge.
+	var screen = Rect2(-layout_offset / layout_scale, size / layout_scale).grow(80)
+	canvas.draw_rect(screen, Color(0.02, 0.07, 0.08, 0.74))
 	var card: Rect2 = dialog_card(id)
-	if alpha < 1.0:
-		card.position.y += (1.0 - alpha) * 40.0
-	draw_style_box(panel(INK, 26, EDGE, 2), card)
+	canvas.draw_style_box(panel(INK, 26, EDGE, 2), card)
 	var top: float = card.position.y
 	var inner = Rect2(card.position.x + 40, top, card.size.x - 80, card.size.y)
 	match id:
@@ -929,7 +1328,7 @@ func draw_dialog(id: String) -> void:
 			var y: float = top + 120
 			for i in range(HELP_LINES.size()):
 				var badge = Rect2(inner.position.x, y + 2, 44, 44)
-				draw_style_box(panel(GOLD, 22), badge)
+				canvas.draw_style_box(panel(GOLD, 22), badge)
 				centered(str(i + 1), badge, 22, INK, true)
 				y += maxf(56.0, wrapped(HELP_LINES[i], Vector2(inner.position.x + 64, y), inner.size.x - 64, 24, CREAM)) + 22
 			var sample_y: float = minf(y + 6, card.end.y - 250)
@@ -944,15 +1343,15 @@ func draw_dialog(id: String) -> void:
 			centered("ALTITUDE  /  %d" % round_state.target, Rect2(card.position.x, top + 250, card.size.x, 30), 20, MUTED)
 			if last_summary.get("new_best", false):
 				var badge = Rect2(card.get_center().x - 90, top + 296, 180, 42)
-				draw_style_box(panel(GOLD, 21), badge)
+				canvas.draw_style_box(panel(GOLD, 21), badge)
 				centered("NEW BEST", badge, 22, INK, true)
 			var rows = [["Lines cleared", str(round_state.lines_total)], ["Best move", "+%d" % round_state.best_move],
 				["Trays used", "%d / %d" % [round_state.trays_dealt, round_state.max_trays]], ["Summit streak", str(profile.win_streak)]]
 			for i in range(rows.size()):
-				var y: float = top + 380 + i * 70
-				draw_style_box(panel(DEEP, 14), Rect2(inner.position.x, y, inner.size.x, 58))
-				label_at(rows[i][0], Vector2(inner.position.x + 22, y + 38), 23, MUTED)
-				right_aligned(rows[i][1], inner.end.x - 22, y + 39, 25, CREAM, true)
+				var row_y: float = top + 380 + i * 70
+				canvas.draw_style_box(panel(DEEP, 14), Rect2(inner.position.x, row_y, inner.size.x, 58))
+				label_at(rows[i][0], Vector2(inner.position.x + 22, row_y + 38), 23, MUTED)
+				right_aligned(rows[i][1], inner.end.x - 22, row_y + 39, 25, CREAM, true)
 		_:
 			var titles = {"confirm_new": "Start a new trail?", "confirm_exit": "Leave Summit Shards?", "confirm_reset": "Reset statistics?"}
 			var bodies = {"confirm_new": "This trail ends here and counts as played.",
@@ -961,9 +1360,6 @@ func draw_dialog(id: String) -> void:
 			centered(titles.get(id, ""), Rect2(card.position.x, top + 34, card.size.x, 60), 36, CREAM, true)
 			wrapped(bodies.get(id, ""), Vector2(inner.position.x, top + 110), inner.size.x, 24, MUTED)
 	for entry in dialog_buttons(id):
-		var rect: Rect2 = entry.rect
-		rect.position.y += (1.0 - alpha) * 40.0
-		entry.rect = rect
 		draw_button(entry)
 
 # ---------------------------------------------------------------- persistence
@@ -1031,5 +1427,7 @@ func load_round() -> bool:
 			refresh_derived()
 			notice = "Your trail is right where you left it."
 			set_end_notice()
+			if settings != null:
+				refresh_view()
 			return true
 	return false

@@ -2,6 +2,25 @@
 
 Updated: 2026-10-25 (Asia/Katmandu). Sources: `C:\game`. Active project: `C:\game\SummitShards`. Tools: `D:\SummitShardsToolchain`.
 
+## 0.2.1-dev Android smoothness (2026-10-25)
+
+Version code 4, version `0.2.1-dev`. Verified in the same Linux container with the official Godot 4.7.2 Linux editor.
+
+Drawing cost, measured with `tests/perf_probe.gd` (Mesa llvmpipe under Xvfb, 450x800). This is GDScript CPU time spent building each frame's draw commands on this machine, not phone frame time:
+
+| Situation | 0.2.0-dev | 0.2.1-dev |
+| --- | --- | --- |
+| Idle | 0 ms, no repaints | 0 ms, no repaints |
+| Dragging a shard | 1.84 ms per frame | 0.07 ms per frame |
+| Line-clear animation | 2.02 ms per frame | 0.47 ms per frame |
+| Scene ready (warm) | 27 ms | under 1 ms; sounds finish on a worker 30-50 ms later |
+
+- `tools/check_android_policy.py` passed (no permissions, 60 FPS cap and low-processor mode unchanged).
+- **1,156 rules assertions** and **91 scene checks** passed with no script errors or warnings. New scene checks: still screens repaint nothing and return to low-processor mode; dragging lifts low-processor mode; moving within a cell repaints nothing; a new cell repaints only the preview and hint; the dragged shard paints once; a move repaints the board at most twice; a dropped shard flies back to its slot; refills paint once per slot; the result stays hidden and unpainted during the clear and fades in once; tall and wide layouts.
+- Rendered every screen at 450x800 (9:16), 432x960 (20:9) and 600x800 (3:4) and inspected them: no black bars, no clipped controls, continuous home scenery on wide screens.
+
+Not done: the APK was **not rebuilt** and nothing ran on a phone. Before calling this verified on Android, rebuild with `tools/Build-Android.ps1`, then on a budget and a high-refresh phone capture the Godot profiler and a Perfetto trace while dragging and clearing lines, check the launch screen colour, and compare battery drain idle on the board.
+
 ## 0.2.0-dev interaction shell (2026-10-25)
 
 Added Home, How to Play, Pause, Settings, Result and confirmation screens; the Back hierarchy; drag-to-place alongside tap placement; settings and lifetime statistics in separate checksummed saves; animations, synthesized sound effects, Reduced Motion and a 30 FPS battery saver. Touch targets are 96 reference pixels (48 dp). Version code 3, version `0.2.0-dev`.

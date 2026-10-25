@@ -1,14 +1,28 @@
 extends Node
-## Short sound effects synthesized once at startup. No audio files, no
-## streaming and a fixed pool of players, so playback never allocates nodes.
+## Short sound effects synthesized once, on a worker thread, at startup. No
+## audio files, no streaming and a fixed pool of players, so playback never
+## allocates nodes. Synthesis takes about 0.1 s of CPU even on a fast desktop;
+## doing it off the main thread keeps it out of the app's first frames.
 
 const MIX_RATE = 22050
 const VOICES = 4
+const RECIPES = {
+	"tap": [[1320.0], 0.035, 0.5, 0.0],
+	"select": [[880.0, 1175.0], 0.07, 0.55, 0.0],
+	"place": [[196.0], 0.09, 0.9, 0.35],
+	"clear": [[523.25, 659.25, 783.99, 1046.5], 0.32, 0.6, 0.0],
+	"big": [[392.0, 523.25, 659.25, 783.99, 1046.5, 1318.5], 0.5, 0.6, 0.0],
+	"invalid": [[155.56, 130.81], 0.14, 0.7, 0.15],
+	"win": [[523.25, 659.25, 783.99, 1046.5, 1318.5, 1567.98], 0.9, 0.55, 0.0],
+	"lose": [[392.0, 329.63, 261.63], 0.75, 0.55, 0.0],
+}
 
 var enabled: bool = true
 # Headless runs (tests, CI) have no audio output and never retire playbacks.
 var _silent_platform: bool = DisplayServer.get_name() == "headless"
 var _streams: Dictionary = {}
+var _built: Dictionary = {}
+var _task_id: int = -1
 var _players: Array = []
 var _next_voice: int = 0
 
@@ -18,18 +32,27 @@ func _ready() -> void:
 		player.volume_db = -9.0
 		add_child(player)
 		_players.append(player)
-	_streams = {
-		"tap": _tone([1320.0], 0.035, 0.5, 0.0),
-		"select": _tone([880.0, 1175.0], 0.07, 0.55, 0.0),
-		"place": _tone([196.0], 0.09, 0.9, 0.35),
-		"clear": _tone([523.25, 659.25, 783.99, 1046.5], 0.32, 0.6, 0.0),
-		"big": _tone([392.0, 523.25, 659.25, 783.99, 1046.5, 1318.5], 0.5, 0.6, 0.0),
-		"invalid": _tone([155.56, 130.81], 0.14, 0.7, 0.15),
-		"win": _tone([523.25, 659.25, 783.99, 1046.5, 1318.5, 1567.98], 0.9, 0.55, 0.0),
-		"lose": _tone([392.0, 329.63, 261.63], 0.75, 0.55, 0.0),
-	}
+	_task_id = WorkerThreadPool.add_task(_synthesize_all, false, "Synthesize sound effects")
+
+## Worker thread: pure computation into a dictionary the main thread adopts
+## once the task reports completion.
+func _synthesize_all() -> void:
+	var built: Dictionary = {}
+	for sound_name in RECIPES:
+		var recipe: Array = RECIPES[sound_name]
+		built[sound_name] = _tone(recipe[0], recipe[1], recipe[2], recipe[3])
+	_built = built
+
+## Adopts the synthesized sounds. With `wait`, blocks until they exist.
+func _collect(wait: bool) -> bool:
+	if _task_id >= 0 and (wait or WorkerThreadPool.is_task_completed(_task_id)):
+		WorkerThreadPool.wait_for_task_completion(_task_id)
+		_task_id = -1
+		_streams = _built
+	return _task_id < 0
 
 func _exit_tree() -> void:
+	_collect(true)
 	stop_all()
 
 func stop_all() -> void:
@@ -38,10 +61,15 @@ func stop_all() -> void:
 		player.stream = null
 
 func has_sound(sound_name: String) -> bool:
+	_collect(true)
 	return _streams.has(sound_name)
 
+## Plays a sound if it is ready. The only sounds that could be skipped are
+## those requested in the first instants after launch, before synthesis ends.
 func play(sound_name: String, pitch: float = 1.0) -> void:
-	if not enabled or _silent_platform or not _streams.has(sound_name) or _players.is_empty():
+	if not enabled or _silent_platform or _players.is_empty() or not _collect(false):
+		return
+	if not _streams.has(sound_name):
 		return
 	var player: AudioStreamPlayer = _players[_next_voice]
 	_next_voice = (_next_voice + 1) % _players.size()
