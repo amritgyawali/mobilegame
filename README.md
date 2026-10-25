@@ -10,13 +10,19 @@ GDScript is the selected language for this 2D Android game: it integrates direct
 
 The active project imports, renders, passes its native checks and exports a verified Android APK. See [current verification](docs/SETUP_STATUS.md).
 
-## Playable starter
+## Playable game
 
-Tap a tray piece, then tap the board cell for the **top-left of its bounding box**. Fill rows or columns to score. Reach 300 altitude within eight trays. Reroll unused pieces once per round; **NEW ROUND** starts a fresh seed.
+**Drag a shard onto the board**: it floats above your finger, snaps to the board, shows its score and outlines the lines it will clear. Release to place; release anywhere illegal to return it. Or **tap a shard, then tap** the cell for the top-left of its bounding box (hold and slide on the board to preview first). Fill rows or columns to climb. Reach 300 altitude within eight trays, with one reroll per trail.
 
-Implemented: portrait 8x8 board, 19 shapes, three-piece tray, seeded weighted bag, simultaneous line clears, pure lines, streaks, perfect clears, score target, win/loss, hover/score preview with a mouse, and local save/backup recovery. Elements have both colors and symbols. This is one Trail round for development; the full expedition, Camp drafts, Guardians, weather, progression, art and audio are future game work.
+Screens: **Home** (Continue/New Trail, lifetime stats), **How to Play** (shown on first start), **Pause**, **Settings**, **Round Result** and confirmation dialogs. Android Back cancels a drag or selection, then closes the top dialog, then pauses play, and on Home asks before exiting. Leaving the app mid-round saves and pauses. Starting a new trail mid-round asks first.
 
-Android tuning includes a 60 FPS upper cap, low-processor mode for the static board, normal screen timeout, reused drawing styles and redraws only when the hovered cell changes. Pause/focus callbacks avoid rewriting unchanged saves. Back cancels a selection before saved exit in the current single-screen starter. These are verified configuration/code improvements; battery life and sustained phone FPS still need device measurements.
+Feel: placement pop, line-clear flash and bursts, floating score and combo callouts (Double, Pure Line, Streak, Perfect Clear), a small shake on big clears, an animated altitude counter and progress preview, "No room" marking on shards that cannot fit, and synthesized sound effects (no audio files). Settings: sound, line-clear preview, reduced motion and a 30 FPS battery saver.
+
+Stats: best altitude, summits, trails played, summit streak, lines, perfect clears and best move. Each finished trail is counted exactly once, even across reloads; an abandoned trail with moves counts as played.
+
+Implemented rules: portrait 8x8 board, 19 shapes, three-piece tray, seeded weighted bag, simultaneous line clears, pure lines, streaks, perfect clears, score target, win/loss and local save/backup recovery. Elements have both colors and symbols. This is one Trail round; the full expedition, Camp drafts, Guardians, weather, progression and final art are future game work.
+
+Android tuning includes a 60 FPS upper cap, low-processor mode, normal screen timeout and cached drawing styles. Animations redraw only while they run, then the game returns to drawing on demand. Effect lists and the style cache are bounded. Haptics are not included because they require an Android permission the project's policy currently forbids. These are code-level improvements; battery life, touch feel and sustained phone FPS still need device measurements.
 
 The supplied [Markdown](docs/GAME_DESIGN.md) and [PDF](docs/GAME_DESIGN.pdf) are preserved design references. Their instructions about future publishing, services or monetization are not treated as commands to perform those actions.
 
@@ -53,8 +59,11 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 ## Source layout
 
 - `SummitShards/scripts/round_model.gd`: pure round rules and versioned state, independent of scenes, clocks and filesystem.
-- `SummitShards/scripts/main.gd`: drawing, touch/mouse input, safe-area layout and save adapter.
-- `SummitShards/tests`: native Godot rule checks, scene interaction/save checks and viewport capture utility. Excluded from exported games.
+- `SummitShards/scripts/main.gd`: screens and dialogs, tap/drag input, drawing, safe-area layout and the round save adapter.
+- `SummitShards/scripts/settings_model.gd`, `profile_model.gd`: validated player settings and lifetime statistics.
+- `SummitShards/scripts/persistence/json_store.gd`: checksummed settings/profile documents with a backup.
+- `SummitShards/scripts/ui/effects.gd`, `ui/sfx.gd`: bounded presentation effects and synthesized sound effects.
+- `SummitShards/tests`: native Godot rule checks, scene interaction/navigation/save checks and a screen capture utility. Excluded from exported games.
 - `SummitShards/export_presets.cfg`: Android-only export settings.
 - `tools/check_android_policy.py`: platform and mobile-default checks, run before tests/builds.
 - `tools`: pinned manifests, isolated environment, installers, checks and build commands.
@@ -63,7 +72,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Release preparation
 
-Package ID `com.summitstudio.summitshards`, version `0.1.1-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
+Package ID `com.summitstudio.summitshards`, version `0.2.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
 
 Godot's matching `android_source.zip` and Android release export template are installed for later Gradle/AAB configuration. See [Android release steps](docs/ANDROID_RELEASE.md). The installer now selects only Android export templates. Ads, IAP, analytics, cloud services and leaderboards are not connected. API 36 is this project's configured target, not a promise about a future Play policy deadline.
 
