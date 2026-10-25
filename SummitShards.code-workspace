@@ -1,0 +1,23 @@
+{
+  "folders": [{ "name": "Summit Shards", "path": "SummitShards" }],
+  "settings": {
+    "godotTools.editorPath.godot4": "${env:SUMMIT_GODOT_EDITOR}",
+    "files.exclude": { "**/.godot": true },
+    "files.watcherExclude": { "**/.godot/**": true },
+    "search.exclude": { "**/.godot": true },
+    "files.eol": "\n",
+    "editor.insertSpaces": false,
+    "editor.tabSize": 4
+  },
+  "extensions": { "recommendations": ["geequlim.godot-tools"] },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      { "label": "Summit: Open Godot", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/../tools/Open-Godot.ps1"], "problemMatcher": [] },
+      { "label": "Summit: Play game", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/../tools/Run-Game.ps1"], "problemMatcher": [] },
+      { "label": "Summit: Test game", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/../tools/Test-Game.ps1"], "group": { "kind": "test", "isDefault": true }, "problemMatcher": [] },
+      { "label": "Summit: Build Android APK", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/../tools/Build-Android.ps1"], "group": { "kind": "build", "isDefault": true }, "problemMatcher": [] },
+      { "label": "Summit: Check tools", "type": "shell", "command": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/../tools/Doctor.ps1"], "problemMatcher": [] }
+    ]
+  }
+}

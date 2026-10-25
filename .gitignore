@@ -1,0 +1,23 @@
+# Generated game/build state
+/Logs/
+/Builds/
+/artifacts/
+.vs/
+Thumbs.db
+.DS_Store
+# Credentials and signing material
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+*.p12
+google-services.json
+/tools/local.settings.json
+
+# Godot generated state and local export credentials
+**/.godot/
+**/export_credentials.cfg
+/SummitShards/android/
+**/__pycache__/
+*.pyc

@@ -1,0 +1,7 @@
+{
+  "files.exclude": { "**/.git": true, "**/.godot": true },
+  "search.exclude": { "Builds": true, "Logs": true, "**/.godot": true },
+  "files.watcherExclude": { "**/Builds/**": true, "**/Logs/**": true, "**/.godot/**": true },
+  "files.eol": "\n",
+  "editor.formatOnSave": true
+}

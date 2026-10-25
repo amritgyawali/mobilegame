@@ -1,0 +1,46 @@
+{
+  "description": "Pinned standalone Android APK development dependencies; no Unity editor required.",
+  "source": "Unity public release metadata for 6000.3.27f1; SHA-256 values captured from installed, ZIP-validated downloads.",
+  "components": [
+    {
+      "id": "android-open-jdk-17.0.18+8",
+      "url": "https://download.unity3d.com/download_unity/open-jdk/open-jdk-win-x64/jdk17.0.18-8_15e8817d1f5db6db3571ebe7430ef37f7fa8e60e8ff6f3e18ca1cb4c29f78774.zip",
+      "sha256": "15e8817d1f5db6db3571ebe7430ef37f7fa8e60e8ff6f3e18ca1cb4c29f78774",
+      "bytes": 118110508,
+      "destination": "Android/JDK",
+      "strip_prefix": ""
+    },
+    {
+      "id": "android-sdk-build-tools-36.0.0",
+      "url": "https://dl.google.com/android/repository/build-tools_r36_windows.zip",
+      "sha256": "aa1095cb14d83e483818a748a2c06faaeb8e601561b06a356a119a1b2ca280d3",
+      "bytes": 58699878,
+      "destination": "Android/SDK/build-tools/36.0.0",
+      "strip_prefix": "android-16/"
+    },
+    {
+      "id": "android-sdk-platform-tools-37.0.1",
+      "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip",
+      "sha256": "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99",
+      "bytes": 8044989,
+      "destination": "Android/SDK",
+      "strip_prefix": ""
+    },
+    {
+      "id": "android-sdk-platforms-36",
+      "url": "https://dl.google.com/android/repository/platform-36_r02.zip",
+      "sha256": "37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e",
+      "bytes": 65878410,
+      "destination": "Android/SDK/platforms",
+      "strip_prefix": ""
+    },
+    {
+      "id": "android-sdk-command-line-tools-16.0",
+      "url": "https://dl.google.com/android/repository/commandlinetools-win-12266719_latest.zip",
+      "sha256": "f9088c04a44f1f37a8a3a228a7663e11ae9445fa07529c96cef38acb985a88f3",
+      "bytes": 143481958,
+      "destination": "Android/SDK/cmdline-tools/16.0",
+      "strip_prefix": "cmdline-tools/"
+    }
+  ]
+}
