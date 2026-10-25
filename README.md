@@ -22,7 +22,16 @@ Stats: best altitude, summits, trails played, summit streak, lines, perfect clea
 
 Implemented rules: portrait 8x8 board, 19 shapes, three-piece tray, seeded weighted bag, simultaneous line clears, pure lines, streaks, perfect clears, score target, win/loss and local save/backup recovery. Elements have both colors and symbols. This is one Trail round; the full expedition, Camp drafts, Guardians, weather, progression and final art are future game work.
 
-Android tuning includes a 60 FPS upper cap, low-processor mode, normal screen timeout and cached drawing styles. Animations redraw only while they run, then the game returns to drawing on demand. Effect lists and the style cache are bounded. Haptics are not included because they require an Android permission the project's policy currently forbids. These are code-level improvements; battery life, touch feel and sustained phone FPS still need device measurements.
+Android smoothness (0.2.1-dev):
+
+- **Layered drawing.** The screen is split into layers that repaint only when their own content changes. Dragging moves the shard's layer; shake, fades, slides and tray refills move or fade layers. The 64-tile board repaints only when a move lands. Measured with `tests/perf_probe.gd` on the development machine: drawing work per frame while dragging fell from 1.84 ms to 0.07 ms, and during a line clear from 2.02 ms to 0.47 ms. Idle frames paint nothing.
+- **Full speed only while moving.** Low-processor mode (which sleeps a little each frame to save battery) is lifted while something animates or a finger drags, then restored as soon as the screen is still.
+- **Faster start.** Sound effects are synthesized on a background thread, removing about 27 ms of main-thread work here (more on a budget phone). Fonts used by big callouts are warmed shortly after launch so the first clear does not stall.
+- **Every screen shape.** The layout fills tall (20:9) and wide screens without black bars, sits a little low on tall phones for thumb reach, and keeps a margin above the bottom gesture area. Layout is computed on resize/resume only, never per touch event.
+- **Seamless launch.** The Android launch screen uses the game's background colour instead of a grey Godot logo screen.
+- Animated touches: shards grow as they lift, fly back to the tray when dropped off the board, and pop into the tray when dealt; screens and dialogs fade in. Reduced Motion removes the movement.
+
+The 60 FPS cap, normal screen timeout and zero Android permissions are unchanged. Haptics are not included because they require an Android permission the project's policy currently forbids. Phone frame rates, battery use and touch feel still need measuring on hardware.
 
 The supplied [Markdown](docs/GAME_DESIGN.md) and [PDF](docs/GAME_DESIGN.pdf) are preserved design references. Their instructions about future publishing, services or monetization are not treated as commands to perform those actions.
 
@@ -63,7 +72,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 - `SummitShards/scripts/settings_model.gd`, `profile_model.gd`: validated player settings and lifetime statistics.
 - `SummitShards/scripts/persistence/json_store.gd`: checksummed settings/profile documents with a backup.
 - `SummitShards/scripts/ui/effects.gd`, `ui/sfx.gd`: bounded presentation effects and synthesized sound effects.
-- `SummitShards/tests`: native Godot rule checks, scene interaction/navigation/save checks and a screen capture utility. Excluded from exported games.
+- `SummitShards/tests`: native Godot rule checks, scene interaction/navigation/save/smoothness checks, a screen capture utility (`render_preview.gd`) and a drawing-cost probe (`perf_probe.gd`). Excluded from exported games.
 - `SummitShards/export_presets.cfg`: Android-only export settings.
 - `tools/check_android_policy.py`: platform and mobile-default checks, run before tests/builds.
 - `tools`: pinned manifests, isolated environment, installers, checks and build commands.
@@ -72,7 +81,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Release preparation
 
-Package ID `com.summitstudio.summitshards`, version `0.2.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
+Package ID `com.summitstudio.summitshards`, version `0.2.1-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
 
 Godot's matching `android_source.zip` and Android release export template are installed for later Gradle/AAB configuration. See [Android release steps](docs/ANDROID_RELEASE.md). The installer now selects only Android export templates. Ads, IAP, analytics, cloud services and leaderboards are not connected. API 36 is this project's configured target, not a promise about a future Play policy deadline.
 
