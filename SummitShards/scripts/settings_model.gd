@@ -7,6 +7,7 @@ const DEFAULTS = {
 	"reduced_motion": false,
 	"clear_preview": true,
 	"battery_saver": false,
+	"high_refresh": false,
 }
 
 var values: Dictionary = DEFAULTS.duplicate()

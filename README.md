@@ -31,6 +31,14 @@ Stats: best altitude, summits, trails played, summit streak, lines, perfect clea
 
 Implemented rules: portrait 8x8 board, 19 shapes, three-piece tray, seeded weighted bag, simultaneous line clears, pure lines, streaks, perfect clears, score target, win/loss and local save/backup recovery. Elements have both colors and symbols. This is one Trail round; the full expedition, Camp drafts, Guardians, weather, progression and final art are future game work.
 
+Any device shape (0.4.0-dev):
+
+- **Responsive zones.** The layout fits the 720x1280 design into the safe area, then spreads over the screen's real shape. On tall phones (20:9, 21:9) the header stays at the top, the tray and buttons move down toward the thumb (keeping a margin above the gesture bar), the board settles between, the tray cards grow (bigger shards to grab) and dialogs centre. On tablets, foldables and split-screen windows the game keeps full height and fills the side margins with scenery that runs edge to edge.
+- **Side panels on wide screens.** With enough room beside the board (for example an unfolded foldable), the left panel shows the round (floor, weather or Guardian rule, target, trays, rerolls, Coins) and the right panel lists your talismans with their rules. Quick Trail shows its stats and a scoring guide instead.
+- **Adaptive effects.** While something animates, the game watches its own frame time. If a device cannot keep up, bursts drop to a lighter level (fewer particles) and come back when frames are on time again. Scores and saves never depend on it.
+- **Smooth 90/120 Hz (setting, off by default).** On high-refresh screens, motion can run at the screen's own rate (up to 120) while something moves; still screens stay at 60 and Battery saver still caps at 30. The setting names your screen's reported rate.
+- Checked by an automated sweep of 9 screen shapes (from 480x800 to 21:9, 3:4, near-square and very wide windows): every control on every screen stays visible, zones never overlap, and taps and drags land on the right cells.
+
 Android smoothness (0.2.1-dev):
 
 - **Layered drawing.** The screen is split into layers that repaint only when their own content changes. Dragging moves the shard's layer; shake, fades, slides and tray refills move or fade layers. The 64-tile board repaints only when a move lands. Measured with `tests/perf_probe.gd` on the development machine: drawing work per frame while dragging fell from 1.84 ms to 0.07 ms, and during a line clear from 2.02 ms to 0.47 ms. Idle frames paint nothing.
@@ -92,7 +100,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Release preparation
 
-Package ID `com.summitstudio.summitshards`, version `0.3.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
+Package ID `com.summitstudio.summitshards`, version `0.4.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
 
 Godot's matching `android_source.zip` and Android release export template are installed for later Gradle/AAB configuration. See [Android release steps](docs/ANDROID_RELEASE.md). The installer now selects only Android export templates. Ads, IAP, analytics, cloud services and leaderboards are not connected. API 36 is this project's configured target, not a promise about a future Play policy deadline.
 

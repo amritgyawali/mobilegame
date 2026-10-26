@@ -34,8 +34,8 @@ func measure(label: String, n: int, step: Callable) -> void:
 		usec += d_usec
 		if d_passes > 0:
 			per_layer.append("%s x%d @%.2fms" % [key, d_passes, d_usec / 1000.0 / d_passes])
-	print("%-26s frames=%d  repaints=%-4d draw CPU per frame=%.3f ms  low-power=%s  [%s]" % [
-		label, n, passes, usec / 1000.0 / n, OS.low_processor_usage_mode, ", ".join(per_layer)])
+	print("%-26s frames=%d  repaints=%-4d draw CPU per frame=%.3f ms  low-power=%s  effects=%s  [%s]" % [
+		label, n, passes, usec / 1000.0 / n, OS.low_processor_usage_mode, "full" if app.effects.quality == app.effects.FULL else "lite", ", ".join(per_layer)])
 
 func run() -> void:
 	var paths: Array = ["user://perf-round.json", "user://perf-settings.json", "user://perf-profile.json"]

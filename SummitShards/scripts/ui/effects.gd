@@ -4,12 +4,17 @@ extends RefCounted
 ## a score, a save or a move. Every list is capped.
 
 const MAX_PARTICLES = 144
+## Quality levels set by the scene's frame-time monitor.
+const FULL = 2
+const LITE = 1
+const LITE_MAX_PARTICLES = 48
 const MAX_TEXTS = 6
 const POP_TIME = 0.18
 const CLEAR_TIME = 0.38
 
 var time: float = 0.0
 var reduced_motion: bool = false
+var quality: int = FULL
 var pops: Dictionary = {}       # board index -> start time
 var clears: Array = []          # {index, element, start}
 var particles: Array = []       # {pos, vel, color, start, life, size}
@@ -74,8 +79,9 @@ func add_clear(index: int, element: int, center: Vector2, color: Color) -> void:
 	clears.append({"index": index, "element": element, "start": time})
 	if reduced_motion:
 		return
-	for i in range(3):
-		if particles.size() >= MAX_PARTICLES:
+	var limit: int = MAX_PARTICLES if quality == FULL else LITE_MAX_PARTICLES
+	for i in range(3 if quality == FULL else 1):
+		while particles.size() >= limit:
 			particles.pop_front()
 		var angle: float = _rng.randf_range(0.0, TAU)
 		var speed: float = _rng.randf_range(140.0, 420.0)

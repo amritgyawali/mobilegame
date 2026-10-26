@@ -332,18 +332,116 @@ func run() -> void:
 	await wait(0.4)
 	check(app.route == app.HOME and app.dialogs.is_empty() and not app.board_layer.visible and app.content.modulate.a == 1.0, "Home after a result")
 
-	# Any phone shape: the layout fills the width of tall screens, sits low
-	# for the thumb with a margin above the bottom edge, and centres on wide ones.
+	# Any device shape. Screen sizes in viewport units for: a 9:16 phone, a
+	# small old phone, 20:9 and 21:9 phones, a 3:4 tablet, a near-square
+	# unfolded foldable, a split-screen window and a very wide window.
 	var original_size: Vector2 = app.size
+	var shapes: Array = [Vector2(720, 1280), Vector2(480, 800), Vector2(720, 1600), Vector2(720, 1680),
+		Vector2(960, 1280), Vector2(1160, 1280), Vector2(720, 1100), Vector2(1600, 1200), Vector2(400, 1300)]
+	var layout_problems: Array = []
+	for shape in shapes:
+		app.size = shape
+		app.update_layout()
+		var view: Rect2 = app.visible_rect()
+		var tag: String = "%dx%d" % [shape.x, shape.y]
+		# The visible area maps exactly onto the screen.
+		var mapped = Rect2(app.layout_offset + view.position * app.layout_scale, view.size * app.layout_scale)
+		if absf(mapped.size.x - shape.x) > 1.0 or absf(mapped.end.y - shape.y) > 1.0:
+			layout_problems.append("%s view %s" % [tag, mapped])
+		if app.layout_scale < minf(shape.x / 720.0, shape.y / 1280.0) - 0.001:
+			layout_problems.append("%s scaled below fit" % tag)
+		# Zones stay in order and never overlap.
+		var card_bottom: float = 306.0 + app.zone_top
+		var board: Rect2 = app.board_rect().grow(10)
+		var hint: Rect2 = app.hint_rect()
+		var tray: Rect2 = app.tray_rect(0)
+		var buttons: Rect2 = app.bottom_rect(app.NEW_RECT)
+		if not (card_bottom <= board.position.y and board.end.y <= hint.end.y and hint.end.y <= tray.position.y and tray.end.y <= buttons.position.y and buttons.end.y <= view.end.y):
+			layout_problems.append("%s zones %s %s %s %s %s" % [tag, card_bottom, board, hint, tray, buttons])
+		if shape.y / shape.x > 1280.0 / 720.0 + 0.01 and view.end.y - buttons.end.y < 12.0:
+			layout_problems.append("%s no bottom margin" % tag)
+		# Every control, on every screen and dialog, stays on screen.
+		for route_name in [app.HOME, app.PLAY, app.CAMP]:
+			app.route = route_name
+			for dialog in [[], ["pause"], ["settings"], ["help"], ["result"], ["confirm_new"]]:
+				app.dialogs = dialog.duplicate()
+				if route_name == app.CAMP and (app.run == null or dialog.size() > 0):
+					continue
+				for entry in app.current_buttons():
+					if not view.encloses(entry.rect):
+						layout_problems.append("%s %s %s %s" % [tag, route_name, dialog, entry.id])
+		app.dialogs.clear()
+		app.route = app.PLAY
+		# Taps and drags land where the board is drawn.
+		var probe: Vector2i = Vector2i(5, 6)
+		if app.board_cell(app.board_rect().position + (Vector2(probe) + Vector2(0.5, 0.5)) * app.CELL) != probe:
+			layout_problems.append("%s board mapping" % tag)
+		for tray_slot in range(3):
+			var center: Vector2 = app.tray_rect(tray_slot).get_center()
+			var shown: Vector2 = app.slot_layers[tray_slot].position
+			# A shard with no room sits 6 px higher to make space for its label.
+			if app.slot_at(center) != tray_slot or shown.x != center.x or absf(shown.y - center.y) > 6.0:
+				layout_problems.append("%s tray slot %d" % [tag, tray_slot])
+		var anchor_slot: int = 0 if not app.round_state.tray[0].is_empty() else (1 if not app.round_state.tray[1].is_empty() else 2)
+		if app.drag_anchor(anchor_slot, app.finger_for_anchor(anchor_slot, Vector2i(2, 3))) != Vector2i(2, 3):
+			layout_problems.append("%s drag mapping" % tag)
+		if app.board_layer.position.y != app.zone_mid:
+			layout_problems.append("%s board layer" % tag)
+		# Side panels only where there is room for them.
+		app.refresh_view()
+		if app.side_layer.visible != (app.layout_side >= app.SIDE_PANEL_MIN):
+			layout_problems.append("%s side panels" % tag)
+		if app.side_layer.visible:
+			for rect in app.side_panel_rects():
+				if not view.encloses(rect) or rect.intersects(app.board_rect().grow(10)):
+					layout_problems.append("%s side panel placement" % tag)
+	check(layout_problems.is_empty(), "Every device shape lays out correctly: %s" % [layout_problems])
+	# A tall phone gives the extra height to spacing and bigger tray cards.
 	app.size = Vector2(720, 1600)
 	app.update_layout()
-	var bottom: float = app.layout_offset.y + 1280 * app.layout_scale
-	check(app.layout_scale == 1.0 and app.layout_offset.y > 160 and bottom < 1600 - 60, "Tall screen: full width, lower placement, bottom margin")
-	app.size = Vector2(960, 1280)
+	check(app.layout_scale == 1.0 and app.tray_rect(0).size.y > 156.0 and app.zone_bottom > app.zone_mid and app.zone_mid > app.zone_top, "Tall screens spread the zones and grow the tray")
+	if app.round_state.status != app.Model.PLAYING:
+		app.start_new_round()
+	app.route = app.PLAY
+	app.dialogs.clear()
+	app.selected = -1
+	app.handle_click(app.tray_rect(1).get_center())
+	check(app.selected == 1, "Tray taps work on a tall layout")
+	var tall_move: Array = first_move()
+	var tall_moves: int = app.round_state.moves
+	var tall_finger: Vector2 = app.finger_for_anchor(tall_move[0], tall_move[1])
+	app.pointer_pressed(app.tray_rect(tall_move[0]).get_center())
+	app.pointer_moved(tall_finger, true)
+	app.pointer_released(tall_finger)
+	check(app.round_state.moves == tall_moves + 1, "Drag and drop works on a tall layout")
+	app.selected = -1
+	app.size = Vector2(1600, 1200)
 	app.update_layout()
-	check(app.layout_scale == 1.0 and app.layout_offset == Vector2(120, 0), "Wide screen: centred")
+	check(app.layout_extra == 0.0 and app.layout_side > app.SIDE_PANEL_MIN, "Wide screens keep full height and gain sides")
 	app.size = original_size
 	app.update_layout()
+	app.refresh_view()
+
+	# 90/120 Hz only when asked for, never in Battery saver, capped at 120.
+	check(app.motion_fps(false, false, 120.0) == 60 and app.motion_fps(false, true, 120.0) == 120 and app.motion_fps(false, true, 90.0) == 90, "High refresh follows the screen when enabled")
+	check(app.motion_fps(true, true, 120.0) == 30 and app.motion_fps(false, true, 144.0) == 120 and app.motion_fps(false, true, -1.0) == 60, "Battery saver wins; 120 cap; unknown rates stay at 60")
+	# Adaptive quality: slow frames lighten the effects, fast frames restore them.
+	var saved_max: int = Engine.max_fps
+	Engine.max_fps = 60
+	app.effects.quality = app.effects.FULL
+	app._frame_samples = 0
+	for i in range(40):
+		app.track_frame_time(1.0 / 25.0)
+	check(app.effects.quality == app.effects.LITE, "Slow frames switch effects to the lighter level")
+	app.effects.clear_all()
+	for i in range(200):
+		app.effects.add_clear(i % 64, 1, Vector2.ZERO, Color.WHITE)
+	check(app.effects.particles.size() <= app.effects.LITE_MAX_PARTICLES, "The lighter level caps particles lower")
+	for i in range(400):
+		app.track_frame_time(1.0 / 60.0)
+	check(app.effects.quality == app.effects.FULL, "Steady frames restore full effects")
+	app.effects.clear_all()
+	Engine.max_fps = saved_max
 
 	# Every control on every screen is a 48 dp target inside the layout.
 	var small: Array = []

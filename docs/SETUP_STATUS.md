@@ -2,6 +2,17 @@
 
 Updated: 2026-10-25 (Asia/Katmandu). Sources: `C:\game`. Active project: `C:\game\SummitShards`. Tools: `D:\SummitShardsToolchain`.
 
+## 0.4.0-dev Any device shape (2026-10-26)
+
+Version code 6, version `0.4.0-dev`. Verified in the Linux container with the official Godot 4.7.2 Linux editor.
+
+- `tools/check_android_policy.py` passed (no permissions; the 60 FPS project cap, portrait and low-processor mode unchanged).
+- **1,156 rules**, **114 expedition rules**, **99 scene** and **35 expedition scene** checks passed with no script errors or warnings. New scene checks sweep 9 screen shapes (720x1280, 480x800, 720x1600, 720x1680, 960x1280, 1160x1280, 720x1100, 1600x1200, 400x1300) across Home, play, Camp and dialogs: every control inside the visible area, zones in order without overlap, the visible area mapping exactly onto the screen, board, tray and drag mapping, side panels only where they fit; tap and drag on a tall layout; the frame-rate rule; adaptive quality dropping on slow frames, capping particles and recovering.
+- Rendered Home, play, Camp, intro, Round cleared, Settings and How to Play at 360x800, 412x915, 450x800, 600x800, 880x900 and 1000x700 (`tests/render_preview.gd`, `tests/render_expedition.gd`) and inspected them: no clipped controls, no black bars, scenery edge to edge, side panels on the two wide shapes, long names shortened to fit.
+- Drawing cost unchanged (`tests/perf_probe.gd`): about 0.07-0.09 ms per frame while dragging, zero while still.
+
+Not done: no APK rebuild and no device testing. On hardware, check a 90/120 Hz phone with Smooth 90/120 Hz on (Godot's Android frame pacing should follow the raised cap), a budget phone for the adaptive effects, and a foldable for the fold/unfold resize.
+
 ## 0.3.0-dev Expedition (2026-10-25)
 
 Version code 5, version `0.3.0-dev`. Verified in the Linux container with the official Godot 4.7.2 Linux editor.
