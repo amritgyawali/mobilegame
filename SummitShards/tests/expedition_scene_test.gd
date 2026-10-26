@@ -21,7 +21,7 @@ func _initialize() -> void:
 	call_deferred("run")
 
 func cleanup() -> void:
-	for path in PATHS:
+	for path in PATHS + [PATHS[3] + ".daily"]:
 		Store.remove(path)
 
 func ids() -> Array:
@@ -48,6 +48,7 @@ func make_app() -> void:
 	app.settings_path = PATHS[1]
 	app.profile_path = PATHS[2]
 	app.run_path = PATHS[3]
+	app.daily_path = PATHS[3] + ".daily"
 	app.fixed_seed = 6100
 	root.add_child(app)
 	await process_frame
@@ -192,6 +193,147 @@ func run() -> void:
 	click_button("quick")
 	check(app.mode == app.QUICK and JSON.stringify(app.quick_round.snapshot()) == quick_state, "Quick Trail resumes where it was")
 
+	# --- 0.5: Codex, Altitudes, Daily Climb, runes and XP -----------------
+	app.go_home()
+	app.settings.set_value("reduced_motion", true)
+	app.apply_settings()
+	check(ids().has("codex") and not ids().has("alt_up"), "Home has the Codex; no Altitude choice before a summit")
+	click_button("codex")
+	check(app.dialogs == ["codex"] and ids().has("tab:runes") and ids().has("codex:twin_rope"), "The Codex opens on talismans")
+	click_button("tab:hazards")
+	check(app.codex_tab == "hazards" and ids().has("codex:stone_yak") and ids().has("codex:summit_warden"), "Codex tabs switch")
+	click_button("codex:stone_yak")
+	check(app.codex_pick == "stone_yak", "Codex entries can be inspected")
+	click_button("done")
+	check(app.dialogs.is_empty(), "Done closes the Codex")
+	check(app.profile.discovered.size() > 0 and app.profile.xp >= app.profile.discovered.size() * 15, "Talismans, weather and Guardians met were added to the Codex with XP")
+
+	# Altitude selector after a summit.
+	app.profile.max_altitude = 2
+	app.refresh_view()
+	check(ids().has("alt_up") and ids().has("alt_down"), "Altitude arrows appear once unlocked")
+	click_button("alt_up")
+	click_button("alt_up")
+	click_button("alt_up")
+	check(app.profile.chosen_altitude == 2, "Altitude choice stops at the highest unlocked")
+	click_button("alt_down")
+	check(app.profile.chosen_altitude == 1, "Altitude goes back down")
+	app.fixed_seed = 8100
+	click_button("run_new")
+	if app.dialogs.back() == "confirm_run_new":
+		click_button("confirm_run_new")
+	check(app.run.altitude == 1 and app.run.round.target == 375 and app.run.kind == "expedition", "A new expedition uses the chosen Altitude")
+	check(app.run.talisman_pool.size() < app.Talismans.ALL.size() or app.profile.level() >= 10, "Offers come from the unlocked talismans")
+	var expedition_seed: int = app.run.run_seed
+	back()
+
+	# Runes during a round: instant, line-targeted and slot-targeted.
+	app.run.runes = ["rune_time", "rune_shatter"]
+	app.round_state.rescue_runes = app.run.rescue_count()
+	app.refresh_view()
+	check(ids().has("rune:0") and ids().has("rune:1"), "Held runes show in the round header")
+	var trays: int = app.round_state.max_trays
+	click_button("rune:0")
+	check(app.dialogs == ["rune"] and app.dialog_buttons("rune")[1].get("enabled", true), "Tapping a rune asks before using it")
+	click_button("use_rune")
+	check(app.round_state.max_trays == trays + 2 and app.run.runes == ["rune_shatter"], "Rune of Time used once")
+	var row_cell: Vector2i = Vector2i(4, 5)
+	app.round_state.board[row_cell.y * 8 + 1] = 2
+	click_button("rune:0")
+	click_button("use_rune")
+	check(app.rune_targeting.get("kind", "") == "line" and app.dialogs.is_empty(), "Shattering waits for a cell")
+	back()
+	check(app.rune_targeting.is_empty() and app.run.runes == ["rune_shatter"], "Back cancels targeting and keeps the rune")
+	click_button("rune:0")
+	click_button("use_rune")
+	app.handle_click(app.board_rect().position + (Vector2(row_cell) + Vector2(0.5, 0.5)) * app.CELL)
+	check(app.dialogs == ["line_choice"], "Tapping a cell asks row or column")
+	click_button("line:row")
+	var row_clear: bool = true
+	for x in range(8):
+		row_clear = row_clear and app.round_state.board[row_cell.y * 8 + x] == 0
+	check(row_clear and app.run.runes.is_empty() and app.dialogs.is_empty(), "Shattering cleared the row and was spent")
+	app.run.runes = ["rune_shrink"]
+	app.refresh_view()
+	var big_slot: int = -1
+	for i in range(3):
+		if not app.round_state.tray[i].is_empty() and int(app.round_state.tray[i].shape) != 0:
+			big_slot = i
+	if big_slot >= 0:
+		click_button("rune:0")
+		click_button("use_rune")
+		app.handle_click(app.tray_rect(big_slot).get_center())
+		check(int(app.round_state.tray[big_slot].shape) == 0 and app.run.runes.is_empty(), "Shrinking a tapped shard")
+	app.run.runes = ["rune_wealth"]
+	app.refresh_view()
+	var coins_before: int = app.run.coins
+	click_button("rune:0")
+	click_button("use_rune")
+	check(app.run.coins == coins_before + mini(coins_before, 15), "Wealth works in a round")
+
+	# Camp: rune offers and Wealth at Camp.
+	app.round_state.status = Model.WON
+	app.round_state.score = app.round_state.target
+	app.after_command()
+	click_button("to_camp")
+	if app.run.draft_open:
+		click_button("skip")
+	check(ids().has("buy_rune:0") and ids().has("buy_rune:1"), "The Trader sells runes")
+	app.run.coins = 30
+	app.refresh_view()
+	click_button("buy_rune:0")
+	check(app.run.runes.size() == 1 and app.run.coins == 30 - app.run.rune_price(), "Buying a rune at Camp")
+	app.run.runes = ["rune_wealth"]
+	app.refresh_view()
+	click_button("camp_rune:0")
+	coins_before = app.run.coins
+	click_button("use_rune")
+	check(app.run.coins == coins_before + mini(coins_before, 15) and app.run.runes.is_empty(), "Wealth works at Camp")
+
+	# The summary shows XP; a summit at the top Altitude unlocks the next.
+	var xp_before: int = app.profile.xp
+	click_button("pause")
+	click_button("restart")
+	click_button("confirm_abandon")
+	check(app.profile.xp > xp_before and app.route == app.HOME, "An abandoned expedition still earns its XP")
+
+	# Daily Climb: level 2, one attempt per date, alongside an expedition.
+	app.profile.xp = 0
+	app.today_override = "2026-10-26"
+	app.refresh_view()
+	var daily_entry: Dictionary = app.current_buttons().filter(func(b): return b.id == "daily")[0]
+	check(not daily_entry.get("enabled", true), "The Daily Climb is locked before level 2")
+	app.profile.xp = 60
+	app.fixed_seed = 8200
+	click_button("run_new")
+	back()
+	var expedition_state: String = JSON.stringify(app.expedition_run.snapshot())
+	click_button("pause")
+	click_button("home")
+	check(app.run_active() and click_button("daily") and app.run.kind == "daily" and app.dialogs.back() == "intro", "Daily Climb starts while an expedition waits")
+	check(app.run.run_seed == app.daily_seed("2026-10-26") and app.profile.daily_date == "2026-10-26", "Today's seed, attempt recorded")
+	back()
+	click_button("pause")
+	click_button("home")
+	check(app.daily_active() and app.current_buttons().filter(func(b): return b.id == "daily")[0].label == "CONTINUE DAILY", "Home offers to continue the Daily Climb")
+	click_button("run_continue")
+	check(app.run.kind == "expedition" and JSON.stringify(app.expedition_run.snapshot()) == expedition_state, "The expedition was kept")
+	click_button("pause")
+	click_button("home")
+	click_button("daily")
+	click_button("pause")
+	click_button("restart")
+	click_button("confirm_abandon")
+	check(not app.daily_active() and app.current_buttons().filter(func(b): return b.id == "daily")[0].label == "DAILY DONE", "One Daily Climb per day")
+	app.today_override = "2026-10-27"
+	app.refresh_view()
+	check(app.current_buttons().filter(func(b): return b.id == "daily")[0].label == "DAILY CLIMB", "Tomorrow brings a new climb")
+	app.queue_free()
+	await process_frame
+	await make_app()
+	check(app.run_active() and not app.daily_active() and app.expedition_run.run_seed != expedition_seed, "Both run slots reload")
+	app.dialogs.clear()
+
 	# Every expedition control is a 48 dp target on screen.
 	var small: Array = []
 	var screen = Rect2(0, 0, 720, 1280)
@@ -208,7 +350,10 @@ func run() -> void:
 			app.run.draft_open = draft_open
 			app.camp_selected = -1 if draft_open else 0
 			app.run.talismans = ["climbing_rope", "tea_thermos"]
-			for dialog in [[], ["intro"], ["round_won"], ["run_over"], ["talismans"], ["confirm_abandon"], ["confirm_run_new"]]:
+			app.run.runes = ["rune_time", "rune_echo"]
+			app.run.rune_shop = [{"id": "rune_thaw", "sold": false}, {"id": "dye_fire", "sold": false}]
+			app.rune_dialog_index = 0
+			for dialog in [[], ["intro"], ["round_won"], ["run_over"], ["talismans"], ["confirm_abandon"], ["confirm_run_new"], ["codex"], ["rune"], ["line_choice"]]:
 				app.dialogs = dialog.duplicate()
 				for entry in app.current_buttons():
 					var too_small: bool = entry.rect.size.y < app.BUTTON_H and entry.kind != "chip"

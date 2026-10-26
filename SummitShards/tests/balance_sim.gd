@@ -1,6 +1,6 @@
 extends SceneTree
 ## Balance probe: bots play full expeditions and report how far they get.
-##   godot --headless --path SummitShards --script res://tests/balance_sim.gd -- [runs] [policy]
+##   godot --headless --path SummitShards --script res://tests/balance_sim.gd -- [runs] [policy] [altitude] [pool]
 ## policy "greedy" (default) picks the highest-scoring placement; "first" takes
 ## the first legal one, as a weak-player stand-in. Camp policy: take the
 ## rarest draft card, buy what is affordable, keep xMult talismans rightmost.
@@ -9,12 +9,19 @@ extends SceneTree
 const Run = preload("res://scripts/run_model.gd")
 const Model = preload("res://scripts/round_model.gd")
 const Talismans = preload("res://scripts/content/talismans.gd")
+const Progression = preload("res://scripts/content/progression.gd")
 const MULTIPLIERS = ["twin_rope", "thunderclap", "snow_leopard_fang", "golden_yak", "lantern_festival", "heart_of_mountain", "eternal_glacier"]
 
 func _initialize() -> void:
 	var args: Array = OS.get_cmdline_user_args()
 	var runs: int = int(args[0]) if args.size() > 0 else 30
 	var policy: String = args[1] if args.size() > 1 else "greedy"
+	var altitude: int = int(args[2]) if args.size() > 2 else 0
+	# "starter": only the talismans and runes a new player has unlocked.
+	var options: Dictionary = {"altitude": altitude}
+	if args.size() > 3 and args[3] == "starter":
+		options.talisman_pool = Progression.unlocked(1, "talismans")
+		options.rune_pool = Progression.unlocked(1, "runes")
 	var floors: Array = []
 	floors.resize(9)
 	floors.fill(0)
@@ -23,7 +30,7 @@ func _initialize() -> void:
 	var summits: int = 0
 	var talisman_wins: Dictionary = {}
 	for n in range(runs):
-		var run = Run.new(1000 + n * 7919)
+		var run = Run.new(1000 + n * 7919, options)
 		var guard: int = 0
 		while run.phase != Run.WON and run.phase != Run.LOST and guard < 2000:
 			guard += 1
@@ -43,7 +50,7 @@ func _initialize() -> void:
 		else:
 			var key: String = "F%d %s %s" % [run.floor_reached(), ["Trail", "Ridge", "Guardian"][run.stage], run.hazard]
 			losses[key] = losses.get(key, 0) + 1
-	print("BALANCE (%s, %d runs, %.1f s): summits %d" % [policy, runs, (Time.get_ticks_msec() - started) / 1000.0, summits])
+	print("BALANCE (%s, altitude %d, %s pool, %d runs, %.1f s): summits %d" % [policy, altitude, "starter" if options.has("talisman_pool") else "full", runs, (Time.get_ticks_msec() - started) / 1000.0, summits])
 	for f in range(1, 9):
 		print("  ended on floor %d: %d" % [f, floors[f]])
 	var keys: Array = losses.keys()

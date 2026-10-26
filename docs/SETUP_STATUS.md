@@ -2,6 +2,17 @@
 
 Updated: 2026-10-25 (Asia/Katmandu). Sources: `C:\game`. Active project: `C:\game\SummitShards`. Tools: `D:\SummitShardsToolchain`.
 
+## 0.5.0-dev Runes, Altitudes, XP, Daily Climb and Codex (2026-10-26)
+
+Version code 7, version `0.5.0-dev`. Verified in the Linux container with the official Godot 4.7.2 Linux editor.
+
+- `tools/check_android_policy.py` passed; still no permissions and no network use (the Daily Climb is local).
+- **1,510 checks** with no script errors or warnings: rules 1,156, expedition rules 114, **meta 74** (new: every rune's effect, refusals and exactly-once spending; rescue from a provably stuck board; rune saves; every Altitude rule; unlock schedule and filtered offers; XP table, thresholds, Altitude unlocks, damaged-profile cleanup, reset keeping progression; one Daily per date and identical daily runs; 0.4 saves loading with defaults), scene 99, **expedition scene 67** (new: Codex tabs and entries, Altitude selector, runes used through the header with targeting and Back, Trader runes, Wealth at Camp, XP on abandon, Daily Climb locked/started/continued/done/tomorrow alongside a waiting expedition, both run slots reloading, 48 dp targets on the new dialogs). CI and `tools/Test-Game.ps1` run all five suites.
+- Bot balance (`tests/balance_sim.gd`, now with Altitude and starter-pool options): new-player pool A0, first-fit 60 runs mostly floors 3-5 and greedy 30 runs mostly 5-6, no summits; full pool A0 greedy 3/30 summits; A5 greedy 1/30; A10 greedy 0/30 with half ending on Floor 1.
+- Rendered Home (level, Altitude selector, Daily, Codex), the Codex, runes in a round, the rune and row/column dialogs, the Trader's runes and the summary with XP at 450x800, 360x800 and 880x900 (`tests/render_meta.gd`) and inspected them. Drawing cost unchanged.
+
+Not done: no APK rebuild, no device or human playtest.
+
 ## 0.4.0-dev Any device shape (2026-10-26)
 
 Version code 6, version `0.4.0-dev`. Verified in the Linux container with the official Godot 4.7.2 Linux editor.

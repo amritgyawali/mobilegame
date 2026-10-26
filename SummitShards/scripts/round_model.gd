@@ -23,7 +23,7 @@ const MAX_TALISMANS = 9
 ## Rule keys a round accepts, with their value types and limits.
 const RULE_LIMITS = {
 	"stones_start": [0, 20], "rockfall": [0, 12], "frost": [0, 12], "min_cells": [0, 5],
-	"streak_cap_halves": [0, 20], "tray_delta": [-3, 3],
+	"streak_cap_halves": [0, 20], "tray_delta": [-3, 3], "fixed_disabled": [0, MAX_TALISMANS - 1],
 }
 const RULE_FLAGS = ["langur", "crow", "golden_hour"]
 
@@ -57,6 +57,12 @@ var glacier_lines: int = 0
 var clears_this_round: int = 0
 var tray_cleared: bool = false
 var stones_broken: int = 0
+# Rune effects waiting for the next placements.
+var echo_next: bool = false
+var still_moves: int = 0
+## Runes held by the run that can free a blocked board. While one is held, a
+## stuck tray does not end the round. Set by the run; not saved here.
+var rescue_runes: int = 0
 
 func _init(seed_value: int = 20261024, goal: int = 300, tray_limit: int = 8, config: Dictionary = {}) -> void:
 	shapes = make_shapes()
@@ -74,6 +80,7 @@ func _init(seed_value: int = 20261024, goal: int = 300, tray_limit: int = 8, con
 	coins = maxi(0, int(config.get("coins", 0)))
 	snowball = maxi(0, int(config.get("snowball", 0)))
 	glacier_lines = maxi(0, int(config.get("glacier_lines", 0)))
+	rescue_runes = maxi(0, int(config.get("rescues", 0)))
 	add_stones(int(rules.get("stones_start", 0)))
 	deal(false)
 
@@ -354,18 +361,25 @@ static func _element_of(id: String) -> int:
 ## the enabled talisman to its right, or nothing.
 func scoring_talismans() -> Array:
 	var disabled: int = disabled_slot()
+	var fixed: int = fixed_disabled_slot()
 	var list: Array = []
 	for i in range(talismans.size()):
-		if i == disabled:
+		if i == disabled or i == fixed:
 			continue
 		var id: String = talismans[i]
 		if id == "mirror_lake":
 			var right: int = i + 1
-			if right >= talismans.size() or right == disabled or talismans[right] == "mirror_lake":
+			if right >= talismans.size() or right == disabled or right == fixed or talismans[right] == "mirror_lake":
 				continue
 			id = talismans[right]
 		list.append(id)
 	return list
+
+## Slot Altitude 10 disables for the whole round, or -1.
+func fixed_disabled_slot() -> int:
+	if not rules.has("fixed_disabled") or talismans.is_empty():
+		return -1
+	return int(rules.fixed_disabled) % talismans.size()
 
 ## Slot index the Langur Trickster disables this tray, or -1.
 func disabled_slot() -> int:
@@ -383,7 +397,8 @@ func evaluate(piece: Dictionary, x: int, y: int) -> Dictionary:
 	var effects: Array = scoring_talismans()
 	var clear: Dictionary = clear_lines(tiles, effects.has("ice_axe"), effects.has("rainbow_scarf"))
 	var lines: int = int(clear.lines)
-	var next_streak: int = streak + 1 if lines > 0 else (streak if effects.has("storm_crown") else 0)
+	var keeps_streak: bool = effects.has("storm_crown") or still_moves > 0
+	var next_streak: int = streak + 1 if lines > 0 else (streak if keeps_streak else 0)
 	var next_snowball: int = snowball + (effects.count("snowball") if lines >= 3 else 0)
 	var next_glacier: int = glacier_lines + (lines if effects.has("eternal_glacier") else 0)
 	var ctx: Dictionary = {
@@ -394,6 +409,10 @@ func evaluate(piece: Dictionary, x: int, y: int) -> Dictionary:
 	if rules.has("streak_cap_halves"):
 		ctx.streak_cap_halves = int(rules.streak_cap_halves)
 	var result: Dictionary = calculate_score(placed.size(), clear, next_streak if lines > 0 else 0, effects, ctx)
+	if echo_next:
+		# Rune of Echo: this placement scores twice.
+		result.points = int(result.points) * 2
+		result.echo = true
 	result.tiles = tiles
 	result.clear = clear
 	result.placed = placed
@@ -436,6 +455,8 @@ func try_place(slot: int, x: int, y: int) -> Dictionary:
 	lines_total += int(clear.lines)
 	best_move = maxi(best_move, int(result.points))
 	stones_broken += int(clear.stones_hit)
+	echo_next = false
+	still_moves = maxi(0, still_moves - 1)
 	if int(clear.lines) > 0:
 		clears_this_round += 1
 		tray_cleared = true
@@ -478,8 +499,59 @@ func try_reroll() -> bool:
 	return true
 
 func update_blocked() -> void:
-	if not has_legal_move() and rerolls == 0:
+	if not has_legal_move() and rerolls == 0 and rescue_runes == 0:
 		status = LOST
+
+## Applies a round rune. `target` is {"axis": "row" or "col", "index": 0-7}
+## for Shattering and {"slot": 0-2} for Shrinking. Returns false, changing
+## nothing, if the rune cannot act now; the run then keeps the rune.
+func use_rune(id: String, target: Dictionary = {}) -> bool:
+	if status != PLAYING:
+		return false
+	match id:
+		"rune_time":
+			max_trays += 2
+		"rune_shatter":
+			var index: int = int(target.get("index", -1))
+			var axis: String = String(target.get("axis", ""))
+			if index < 0 or index >= SIZE or (axis != "row" and axis != "col"):
+				return false
+			var cells: Array = []
+			for i in range(SIZE):
+				cells.append(index * SIZE + i if axis == "row" else i * SIZE + index)
+			if cells.all(func(c): return int(board[c]) == 0):
+				return false
+			for c in cells:
+				board[c] = 0
+		"rune_thaw":
+			if not board.has(STONE) and not board.has(CRACKED):
+				return false
+			for i in range(64):
+				if int(board[i]) == STONE or int(board[i]) == CRACKED:
+					board[i] = 0
+		"rune_echo":
+			if echo_next:
+				return false
+			echo_next = true
+		"rune_shrink":
+			var slot: int = int(target.get("slot", -1))
+			if slot < 0 or slot >= 3 or tray[slot].is_empty() or int(tray[slot].shape) == 0:
+				return false
+			tray[slot] = {"shape": 0, "element": int(tray[slot].element)}
+		"rune_still":
+			still_moves = mini(9, still_moves + 3)
+		"dye_sky", "dye_wind", "dye_fire", "dye_water", "dye_earth":
+			var element: int = {"dye_sky": 1, "dye_wind": 2, "dye_fire": 3, "dye_water": 4, "dye_earth": 5}[id]
+			var changed: bool = false
+			for slot in range(3):
+				if not tray[slot].is_empty() and int(tray[slot].element) != element:
+					tray[slot] = {"shape": int(tray[slot].shape), "element": element}
+					changed = true
+			if not changed:
+				return false
+		_:
+			return false
+	return true
 
 func snapshot() -> Dictionary:
 	return {"version": 1, "seed": seed_initial, "rng": rng_state, "board": board.duplicate(),
@@ -489,10 +561,11 @@ func snapshot() -> Dictionary:
 		"best_move": best_move, "perfect_count": perfect_count,
 		"config": {"talismans": talismans.duplicate(), "rules": rules.duplicate(), "rerolls": reroll_limit, "coins": coins},
 		"counters": {"coins_found": coins_found, "snowball": snowball, "glacier_lines": glacier_lines,
-			"clears": clears_this_round, "tray_cleared": tray_cleared, "stones_broken": stones_broken}}
+			"clears": clears_this_round, "tray_cleared": tray_cleared, "stones_broken": stones_broken,
+			"echo": echo_next, "still": still_moves}}
 
 const OPTIONAL_STATS = ["moves", "lines_total", "best_move", "perfect_count"]
-const COUNTER_KEYS = ["coins_found", "snowball", "glacier_lines", "clears", "stones_broken"]
+const COUNTER_KEYS = ["coins_found", "snowball", "glacier_lines", "clears", "stones_broken", "still"]
 
 static func integer_number(value: Variant) -> bool:
 	return value is int or (value is float and is_finite(value) and floor(value) == value and absf(value) <= 9007199254740991.0)
@@ -579,6 +652,8 @@ func restore_snapshot(data: Dictionary) -> bool:
 			return false
 	if counters.has("tray_cleared") and not counters.tray_cleared is bool:
 		return false
+	if counters.has("echo") and not counters.echo is bool:
+		return false
 	seed_initial = int(data.seed)
 	rng_state = int(data.rng)
 	# JSON numbers are floats. Normalize them so a restored snapshot has the
@@ -618,4 +693,6 @@ func restore_snapshot(data: Dictionary) -> bool:
 	clears_this_round = int(counters.get("clears", 0))
 	tray_cleared = counters.get("tray_cleared", false)
 	stones_broken = int(counters.get("stones_broken", 0))
+	echo_next = counters.get("echo", false)
+	still_moves = int(counters.get("still", 0))
 	return true

@@ -12,6 +12,15 @@ The active project imports, renders, passes its native checks and exports a veri
 
 ## Playable game
 
+Progression and modes (0.5.0-dev):
+
+- **Runes**: 12 one-use powers, two slots, bought at the Trader (2 offers per Camp, 3 Coins). Rune of Time (+2 trays), Shattering (destroy a row or column you choose; keeps the streak), Thaw (remove Stones), Wealth (double Coins, max +15; works at Camp), Echo (next placement scores twice), Shrinking (a shard becomes a dot), Stillness (3 placements cannot break the streak) and five Dyes (the tray becomes one element). Tap a rune, confirm, then pick a target if it needs one. Holding Shattering or Shrinking keeps a stuck round alive until you use it.
+- **Expedition XP and levels 1-50** with the design's XP table (10 per round won, 25 per Guardian, 100 for the summit, 15 per Codex discovery) and thresholds. New players start with the design's 19 starter talismans and 10 runes; levels 2-10 unlock the Daily Climb, the other 17 talismans and Shattering/Shrinking. The run summary shows XP earned, the level bar and new unlocks.
+- **Altitudes 1-10**: each summit at your highest Altitude unlocks the next; choose one on Home. Cumulative rules from the design: harder targets (x1.25, x1.5, x2), dearer Trader, 2-card drafts, Ridges with extra Stones, no starting reroll, Guardians with a second rule, interest capped at 3, 7-tray rounds, and a disabled talisman at Altitude 10.
+- **Daily Climb** (level 2): the same seed for every player on the same local date, Altitude 0 with everything unlocked, one attempt per day, saved separately so an expedition can wait. It is a local, offline mode: there is no leaderboard and nothing is uploaded.
+- **Codex**: every talisman, rune, weather and Guardian, with silhouettes for those not yet met. Holding or meeting something adds it (and XP).
+- Bot balance with the new player's starter pool: a first-fit bot mostly ends on floors 3-5 and a greedy bot on floors 5-6, with no summits, so the summit arrives after a few unlocks. Altitude 5 is clearly harder; Altitude 10 ends half of greedy runs on Floor 1.
+
 Two modes from Home:
 
 - **Expedition** (0.3.0-dev): the roguelite run from the design. Eight floors, each with a **Trail**, a **Ridge** (with weather) and a **Guardian** round (with a boss rule), using the design's target table (300 up to 30,000). Win a round to reach **Camp**: take 1 of 3 free talismans (or skip for +3 Coins), buy from the **Trader** (reroll 2, then 3...), sell for half, reorder. Coins come from round rewards, unused trays and interest (+1 per 5 held, max 5). Lose a round and the run ends, unless a Firebird Feather saves it once. Beat The Summit Warden on Floor 8 to reach the summit. Runs save after every move and resume from Home.
@@ -86,12 +95,12 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 - `SummitShards/scripts/round_model.gd`: pure round rules and versioned state, independent of scenes, clocks and filesystem: board, shards, Stones, hazard rules and the talisman scoring pipeline.
 - `SummitShards/scripts/run_model.gd`: pure expedition state machine: floors, encounters, Coins, Camp draft and Trader, Firebird, saves.
-- `SummitShards/scripts/content/talismans.gd`, `content/encounters.gd`: talisman, weather, Guardian and target definitions (data only).
+- `SummitShards/scripts/content/talismans.gd`, `content/encounters.gd`, `content/runes.gd`, `content/progression.gd`: talismans, weather, Guardians, targets, runes, XP, levels, unlocks and Altitudes (data only).
 - `SummitShards/scripts/main.gd`: screens and dialogs, tap/drag input, drawing, safe-area layout and the round save adapter.
 - `SummitShards/scripts/settings_model.gd`, `profile_model.gd`: validated player settings and lifetime statistics.
 - `SummitShards/scripts/persistence/json_store.gd`: checksummed settings/profile documents with a backup.
 - `SummitShards/scripts/ui/effects.gd`, `ui/sfx.gd`: bounded presentation effects and synthesized sound effects.
-- `SummitShards/tests`: native Godot checks (`rules_test`, `run_test`, `scene_test`, `expedition_scene_test`), screen capture utilities (`render_preview.gd`, `render_expedition.gd`), a drawing-cost probe (`perf_probe.gd`) and a balance simulator (`balance_sim.gd`). Excluded from exported games.
+- `SummitShards/tests`: native Godot checks (`rules_test`, `run_test`, `meta_test`, `scene_test`, `expedition_scene_test`), `render_meta.gd` for the progression screens, screen capture utilities (`render_preview.gd`, `render_expedition.gd`), a drawing-cost probe (`perf_probe.gd`) and a balance simulator (`balance_sim.gd`). Excluded from exported games.
 - `SummitShards/export_presets.cfg`: Android-only export settings.
 - `tools/check_android_policy.py`: platform and mobile-default checks, run before tests/builds.
 - `tools`: pinned manifests, isolated environment, installers, checks and build commands.
@@ -100,7 +109,7 @@ Tools live in `D:\SummitShardsToolchain` because C: has limited free space. The 
 
 ## Release preparation
 
-Package ID `com.summitstudio.summitshards`, version `0.4.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
+Package ID `com.summitstudio.summitshards`, version `0.5.0-dev` and the studio name are development placeholders. Choose your permanent identity before publishing. The debug key is not an upload key. No Play Store AAB, release signing key or store submission was created.
 
 Godot's matching `android_source.zip` and Android release export template are installed for later Gradle/AAB configuration. See [Android release steps](docs/ANDROID_RELEASE.md). The installer now selects only Android export templates. Ads, IAP, analytics, cloud services and leaderboards are not connected. API 36 is this project's configured target, not a promise about a future Play policy deadline.
 

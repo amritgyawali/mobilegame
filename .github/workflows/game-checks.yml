@@ -33,7 +33,7 @@ jobs:
         run: |
           & ./godot/Godot_v4.7.2-stable_win64_console.exe --headless --path SummitShards --editor --import --quit
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($test in @('rules', 'run', 'scene', 'expedition_scene')) {
+          foreach ($test in @('rules', 'run', 'meta', 'scene', 'expedition_scene')) {
             & ./godot/Godot_v4.7.2-stable_win64_console.exe --headless --path SummitShards --script "res://tests/${test}_test.gd"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

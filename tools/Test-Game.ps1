@@ -2,7 +2,7 @@
 & python "$PSScriptRoot\check_android_policy.py"
 if ($LASTEXITCODE -ne 0) { throw 'Android-only project policy failed.' }
 New-Item -ItemType Directory -Force -Path "$ProjectRoot\Logs" | Out-Null
-foreach ($test in @('rules', 'run', 'scene', 'expedition_scene')) {
+foreach ($test in @('rules', 'run', 'meta', 'scene', 'expedition_scene')) {
     $stdout = "$ProjectRoot\Logs\godot-$test.log"
     $stderr = "$ProjectRoot\Logs\godot-$test-errors.log"
     $process = Start-Process -FilePath $GodotExe -ArgumentList @('--headless', '--path', ('"' + $GodotProject + '"'), '--script', "res://tests/${test}_test.gd") -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr

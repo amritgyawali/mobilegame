@@ -17,6 +17,8 @@ const Sfx = preload("res://scripts/ui/sfx.gd")
 const Run = preload("res://scripts/run_model.gd")
 const Talismans = preload("res://scripts/content/talismans.gd")
 const Encounters = preload("res://scripts/content/encounters.gd")
+const Runes = preload("res://scripts/content/runes.gd")
+const Progression = preload("res://scripts/content/progression.gd")
 
 const INK = Color("18383d")
 const DEEP = Color("122d32")
@@ -93,6 +95,19 @@ var mode: String = QUICK
 var quick_round: RefCounted
 var run: RefCounted
 var run_path: String = "user://run-v1.json"
+var daily_path: String = "user://daily-v1.json"
+## The expedition and today's Daily Climb are saved separately; `run` is
+## whichever is being played.
+var expedition_run: RefCounted
+var daily_run: RefCounted
+## Tests set this to a fixed "YYYY-MM-DD"; empty means the device's date.
+var today_override: String = ""
+## Rune use in progress: {"index", "id", "kind", "cell"}; empty when none.
+var rune_targeting: Dictionary = {}
+## The rune (held slot index) shown in the rune dialog.
+var rune_dialog_index: int = -1
+var codex_tab: String = "talismans"
+var codex_pick: String = ""
 var last_run_summary: Dictionary = {}
 ## Camp: selected held talisman slot, and a draft card waiting for a slot.
 var camp_selected: int = -1
@@ -411,6 +426,11 @@ func _notification(what: int) -> void:
 ## Android Back: cancel a gesture or selection, then close the top dialog, then
 ## pause gameplay, and finally ask before leaving from the home screen.
 func handle_back() -> void:
+	if not rune_targeting.is_empty() and dialogs.is_empty():
+		rune_targeting = {}
+		reset_notice()
+		refresh_view()
+		return
 	if dragging or pointer_down:
 		cancel_gesture()
 		selected = -1
@@ -598,12 +618,35 @@ func enter_quick() -> void:
 		start_new_round()
 	enter_play()
 
-## Starts a fresh expedition at Floor 1.
-func start_run() -> void:
+func today() -> String:
+	return today_override if today_override != "" else Time.get_date_string_from_system()
+
+## The Daily Climb seed: the same for every player on the same date.
+static func daily_seed(date: String) -> int:
+	return Run.mix(int(date.replace("-", "")) ^ 0x5eed)
+
+func daily_unlocked() -> bool:
+	return profile.level() >= 2
+
+## Starts a fresh expedition (at the chosen Altitude, with unlocked content)
+## or today's Daily Climb (everything unlocked, Altitude 0, one attempt).
+func start_run(kind: String = "expedition") -> void:
 	cancel_gesture()
 	if mode == QUICK:
 		save_round()
-	run = Run.new(next_seed())
+	elif mode == RUN and run != null:
+		save_run()
+	if kind == "daily":
+		if not profile.start_daily(today()):
+			return
+		save_profile()
+		daily_run = Run.new(daily_seed(today()), {"kind": "daily"})
+		run = daily_run
+	else:
+		var level: int = profile.level()
+		expedition_run = Run.new(next_seed(), {"altitude": profile.chosen_altitude,
+			"talisman_pool": Progression.unlocked(level, "talismans"), "rune_pool": Progression.unlocked(level, "runes")})
+		run = expedition_run
 	last_run_summary = {}
 	mode = RUN
 	dialogs.clear()
@@ -615,12 +658,16 @@ func start_run() -> void:
 	open_dialog("intro")
 	show_tutorial_once()
 
-## Resumes the saved expedition where it stopped.
-func enter_run() -> void:
-	if run == null:
+## Resumes a saved expedition or Daily Climb where it stopped.
+func enter_run(kind: String = "expedition") -> void:
+	var target = daily_run if kind == "daily" else expedition_run
+	if target == null:
 		return
 	if mode == QUICK:
 		save_round()
+	elif mode == RUN and run != null and run != target:
+		save_run()
+	run = target
 	mode = RUN
 	dialogs.clear()
 	close_dialog()
@@ -638,6 +685,8 @@ func enter_run() -> void:
 ## Points the board at the expedition's current round.
 func sync_run_round() -> void:
 	round_state = run.round
+	rune_targeting = {}
+	discover_run()
 	selected = -1
 	hover_cell = Vector2i(-1, -1)
 	effects.clear_all()
@@ -650,19 +699,36 @@ func sync_run_round() -> void:
 func record_run() -> void:
 	if run == null:
 		return
-	var summary: Dictionary = profile.record_run(run.run_seed, run.phase == Run.WON, run.floor_reached(), run.rounds_won)
+	var guardians: int = run.beaten.size()
+	var summary: Dictionary = profile.record_run(run.run_seed, run.phase == Run.WON, run.floor_reached(), run.rounds_won,
+		guardians, run.altitude, run.kind)
 	if not summary.is_empty():
 		last_run_summary = summary
 		save_profile()
 
-## Ending an expedition early counts as a played, lost run once it has begun.
+## Adds what the run has shown so far to the Codex (talismans and runes held,
+## the round's weather or Guardians). Each first sighting is worth XP.
+func discover_run() -> void:
+	if run == null:
+		return
+	var found: int = 0
+	for id in run.talismans + run.runes + run.hazard_ids() + ([run.hazard] if run.hazard != "" else []):
+		if profile.discover(id):
+			found += 1
+	if found > 0:
+		save_profile()
+
+## Ending a run early counts as a played, lost run once it has begun (a Daily
+## Climb counts as soon as it starts: one attempt per day).
 func abandon_run() -> void:
-	if run_active() and (run.rounds_won > 0 or run.round.moves > 0):
+	if run == null:
+		return
+	var begun: bool = run.rounds_won > 0 or run.round.moves > 0 or run.kind == "daily"
+	if run.phase != Run.WON and run.phase != Run.LOST and begun:
 		run.phase = Run.LOST
 		record_run()
-	if run != null:
-		run.phase = Run.LOST
-		save_run()
+	run.phase = Run.LOST
+	save_run()
 
 ## Starts a new Quick Trail round.
 func start_new_round() -> void:
@@ -696,21 +762,61 @@ func activate(id: String) -> void:
 		return
 	if route == CAMP and dialogs.is_empty() and camp_action(id):
 		save_run()
+		discover_run()
+		refresh_view()
+		return
+	if id.begins_with("rune:") or id.begins_with("camp_rune:"):
+		rune_dialog_index = int(id.get_slice(":", 1))
+		open_dialog("rune")
+		refresh_view()
+		return
+	if id.begins_with("tab:"):
+		codex_tab = id.substr(4)
+		codex_pick = ""
+		refresh_view()
+		return
+	if id.begins_with("codex:"):
+		codex_pick = id.substr(6)
+		refresh_view()
+		return
+	if id.begins_with("line:"):
+		var axis: String = id.substr(5)
+		var cell: Vector2i = rune_targeting.get("cell", Vector2i.ZERO)
+		close_dialog()
+		apply_rune({"axis": axis, "index": cell.y if axis == "row" else cell.x})
 		refresh_view()
 		return
 	match id:
 		"quick":
 			enter_quick()
 		"run_new":
-			if run_active() and (run.rounds_won > 0 or run.round.moves > 0):
+			if run_active() and (expedition_run.rounds_won > 0 or expedition_run.round.moves > 0):
 				open_dialog("confirm_run_new")
 			else:
 				start_run()
 		"confirm_run_new", "run_again":
+			run = expedition_run
 			abandon_run()
 			start_run()
 		"run_continue":
 			enter_run()
+		"daily":
+			if daily_active():
+				enter_run("daily")
+			elif daily_unlocked() and profile.daily_date != today():
+				start_run("daily")
+		"alt_down", "alt_up":
+			profile.chosen_altitude = clampi(profile.chosen_altitude + (1 if id == "alt_up" else -1), 0, profile.max_altitude)
+			save_profile()
+		"codex":
+			codex_pick = ""
+			open_dialog("codex")
+		"use_rune":
+			use_rune_from_dialog()
+		"cancel_rune":
+			rune_targeting = {}
+			close_dialog()
+			reset_notice()
 		"begin":
 			if run != null and run.begin():
 				save_run()
@@ -918,6 +1024,58 @@ func play_move_feedback(result: Dictionary, before: Array) -> void:
 	fx_layer.queue_redraw()
 	start_animation()
 
+## Whether the rune in held slot `index` can be used right now.
+func rune_usable(index: int) -> bool:
+	if run == null or index < 0 or index >= run.runes.size():
+		return false
+	if run.runes[index] == "rune_wealth":
+		return run.phase == Run.CAMP or run.phase == Run.ROUND
+	return run.phase == Run.ROUND and route == PLAY and round_state.status == Model.PLAYING
+
+## USE in the rune dialog: act at once, or pick a target first (a cell for
+## Shattering, a tray shard for Shrinking).
+func use_rune_from_dialog() -> void:
+	var index: int = rune_dialog_index
+	close_dialog()
+	if not rune_usable(index):
+		return
+	var id: String = run.runes[index]
+	var how: String = Runes.info(id).target
+	if how == "":
+		rune_targeting = {"index": index, "id": id}
+		apply_rune({})
+		return
+	rune_targeting = {"index": index, "id": id, "kind": how}
+	selected = -1
+	notice = "Tap a cell to destroy its row or column." if how == "line" else "Tap a shard in the tray to shrink it."
+
+## Spends the targeted rune. The rune is kept if it could not act.
+func apply_rune(target: Dictionary) -> void:
+	var index: int = int(rune_targeting.get("index", -1))
+	var id: String = rune_targeting.get("id", "")
+	rune_targeting = {}
+	if run == null or index < 0 or index >= run.runes.size() or run.runes[index] != id:
+		return
+	var before: Array = round_state.board.duplicate()
+	if not run.use_rune(index, target):
+		sfx.play("invalid")
+		notice = "%s cannot help right now." % Runes.info(id).name
+		return
+	sfx.play("big", 0.9)
+	notice = "%s used." % Runes.info(id).name
+	if route == PLAY:
+		for i in range(64):
+			if int(before[i]) != 0 and int(round_state.board[i]) == 0:
+				effects.add_clear(i, int(before[i]), cell_rect(i).get_center(), COLORS[int(before[i])])
+		_fx_dirty = true
+		fx_layer.queue_redraw()
+		start_animation()
+		refresh_derived()
+		_slot_pieces = [{}, {}, {}]
+		if round_state.status != Model.PLAYING:
+			after_command()
+	save_run()
+
 ## Camp buttons. Returns true when `id` was a Camp action.
 func camp_action(id: String) -> bool:
 	if run == null or run.phase != Run.CAMP:
@@ -942,6 +1100,12 @@ func camp_action(id: String) -> bool:
 			camp_selected = -1
 		else:
 			camp_selected = slot if camp_selected != slot else -1
+		return true
+	if id.begins_with("buy_rune:"):
+		if run.buy_rune(int(id.substr(9))):
+			sfx.play("select")
+		else:
+			sfx.play("invalid")
 		return true
 	if id.begins_with("buy:"):
 		if run.buy(int(id.substr(4))):
@@ -1045,6 +1209,9 @@ func pointer_pressed(point: Vector2) -> void:
 		return
 	if not dialogs.is_empty() or route != PLAY or round_state.status != Model.PLAYING:
 		return
+	if not rune_targeting.is_empty():
+		target_rune_at(point)
+		return
 	var slot: int = slot_at(point)
 	if slot >= 0 and not round_state.tray[slot].is_empty():
 		press_kind = "slot"
@@ -1106,6 +1273,19 @@ func pointer_released(point: Vector2) -> void:
 		if board_rect().has_point(point):
 			commit_place(selected, board_cell(point))
 		hover_cell = Vector2i(-1, -1)
+	refresh_view()
+
+## A tap while a rune waits for its target.
+func target_rune_at(point: Vector2) -> void:
+	pointer_down = false
+	if rune_targeting.get("kind", "") == "line" and board_rect().has_point(point):
+		rune_targeting.cell = board_cell(point)
+		open_dialog("line_choice")
+	elif rune_targeting.get("kind", "") == "slot" and slot_at(point) >= 0 and not round_state.tray[slot_at(point)].is_empty():
+		apply_rune({"slot": slot_at(point)})
+	else:
+		rune_targeting = {}
+		reset_notice()
 	refresh_view()
 
 ## Lifts a tray shard under the finger: it grows from tray size to board size
@@ -1241,11 +1421,16 @@ func screen_buttons() -> Array:
 		return camp_buttons()
 	var playing: bool = round_state.status == Model.PLAYING
 	if mode == RUN:
-		return [
+		var list: Array = [
 			make_button("pause", top_rect(PAUSE_RECT), "", "icon"),
 			make_button("talismans", talisman_bar_rect(), "", "talisman_bar"),
 			make_button("reroll", bottom_rect(RUN_REROLL_RECT), "REROLL %d" % round_state.rerolls, "secondary", {"enabled": playing and round_state.rerolls > 0}),
 		]
+		if run != null:
+			for i in range(run.runes.size()):
+				list.append(make_button("rune:%d" % i, rune_slot_rect(i), "", "rune",
+					{"rune": run.runes[i], "selected": int(rune_targeting.get("index", -1)) == i}))
+		return list
 	return [
 		make_button("pause", top_rect(PAUSE_RECT), "", "icon"),
 		make_button("new", bottom_rect(NEW_RECT), "NEW TRAIL", "primary"),
@@ -1254,6 +1439,10 @@ func screen_buttons() -> Array:
 
 func talisman_bar_rect() -> Rect2:
 	return bottom_rect(TALISMAN_BAR)
+
+## The two rune slots in the expedition header, left of the pause button.
+func rune_slot_rect(index: int) -> Rect2:
+	return top_rect(Rect2(380 + index * 104, 20, 96, 96))
 
 ## Home: the scenery and stats ride high, the buttons sit low.
 func home_art_shift() -> float:
@@ -1264,17 +1453,36 @@ func home_buttons() -> Array:
 	if run_active():
 		list.append(make_button("run_continue", Rect2(80, 830, 560, 112), "CONTINUE EXPEDITION", "primary",
 			{"sub": run_progress_text()}))
-		list.append(make_button("run_new", Rect2(80, 958, 272, BUTTON_H), "NEW RUN", "secondary"))
-		list.append(make_button("quick", Rect2(368, 958, 272, BUTTON_H), "QUICK TRAIL"))
+		list.append(make_button("run_new", Rect2(80, 958, 176, BUTTON_H), "NEW RUN", "secondary", {"size": 21}))
+		list.append(daily_button(Rect2(272, 958, 176, BUTTON_H)))
+		list.append(make_button("quick", Rect2(464, 958, 176, BUTTON_H), "QUICK TRAIL", "ghost", {"size": 21}))
 	else:
-		list.append(make_button("run_new", Rect2(80, 830, 560, 112), "START EXPEDITION", "primary",
-			{"sub": "8 floors  -  talismans  -  Guardians"}))
-		list.append(make_button("quick", Rect2(80, 958, 560, BUTTON_H), "CONTINUE QUICK TRAIL" if can_continue() else "QUICK TRAIL"))
-	list.append(make_button("help", Rect2(80, 1070, 272, BUTTON_H), "HOW TO PLAY"))
-	list.append(make_button("settings", Rect2(368, 1070, 272, BUTTON_H), "SETTINGS"))
+		var sub: String = "8 floors  -  talismans  -  runes  -  Guardians"
+		if profile.max_altitude > 0:
+			sub = "Altitude %d: %s" % [profile.chosen_altitude, Progression.ALTITUDES[profile.chosen_altitude]]
+			list.append(make_button("alt_down", Rect2(80, 830, 96, 112), "<", "ghost", {"enabled": profile.chosen_altitude > 0}))
+			list.append(make_button("run_new", Rect2(184, 830, 352, 112), "START EXPEDITION", "primary", {"sub": sub}))
+			list.append(make_button("alt_up", Rect2(544, 830, 96, 112), ">", "ghost", {"enabled": profile.chosen_altitude < profile.max_altitude}))
+		else:
+			list.append(make_button("run_new", Rect2(80, 830, 560, 112), "START EXPEDITION", "primary", {"sub": sub}))
+		list.append(daily_button(Rect2(80, 958, 272, BUTTON_H)))
+		list.append(make_button("quick", Rect2(368, 958, 272, BUTTON_H), "CONTINUE QUICK TRAIL" if can_continue() else "QUICK TRAIL", "ghost", {"size": 21}))
+	list.append(make_button("codex", Rect2(80, 1070, 176, BUTTON_H), "CODEX", "ghost", {"size": 21}))
+	list.append(make_button("help", Rect2(272, 1070, 176, BUTTON_H), "HOW TO PLAY", "ghost", {"size": 21}))
+	list.append(make_button("settings", Rect2(464, 1070, 176, BUTTON_H), "SETTINGS", "ghost", {"size": 21}))
 	for entry in list:
 		entry.rect = bottom_rect(entry.rect)
 	return list
+
+## Daily Climb: locked until level 2, one attempt per local date.
+func daily_button(rect: Rect2) -> Dictionary:
+	if daily_active():
+		return make_button("daily", rect, "CONTINUE DAILY", "secondary", {"size": 21})
+	if not daily_unlocked():
+		return make_button("daily", rect, "DAILY  -  LEVEL 2", "ghost", {"size": 21, "enabled": false})
+	if profile.daily_date == today():
+		return make_button("daily", rect, "DAILY DONE", "ghost", {"size": 21, "enabled": false})
+	return make_button("daily", rect, "DAILY CLIMB", "secondary", {"size": 21})
 
 func run_progress_text() -> String:
 	if run == null:
@@ -1316,8 +1524,16 @@ func camp_buttons() -> Array:
 		var offer: Dictionary = run.shop[i]
 		var cost: int = run.price(offer.id)
 		var tag: String = "SOLD" if offer.sold else ("FULL" if not run.has_room() else "%d" % cost)
-		list.append(make_button("buy:%d" % i, top_rect(Rect2(40, 244 + i * 176, 640, 160)), "", "offer",
+		list.append(make_button("buy:%d" % i, top_rect(Rect2(40, 244 + i * 152, 640, 140)), "", "offer",
 			{"talisman": offer.id, "tag": tag, "enabled": not offer.sold and run.has_room() and run.coins >= cost}))
+	for i in range(run.rune_shop.size()):
+		var rune_offer: Dictionary = run.rune_shop[i]
+		var full: bool = run.runes.size() >= Runes.SLOTS
+		var rune_tag: String = "SOLD" if rune_offer.sold else ("FULL" if full else "%d" % run.rune_price())
+		list.append(make_button("buy_rune:%d" % i, top_rect(Rect2(40 + i * 224, 704, 212, BUTTON_H)), "", "rune_offer",
+			{"rune": rune_offer.id, "tag": rune_tag, "enabled": not rune_offer.sold and not full and run.coins >= run.rune_price()}))
+	for i in range(run.runes.size()):
+		list.append(make_button("camp_rune:%d" % i, top_rect(Rect2(488 + i * 102, 704, 90, BUTTON_H)), "", "rune", {"rune": run.runes[i]}))
 	if camp_selected >= 0 and camp_selected < held:
 		list.append(make_button("move_left", bottom_rect(Rect2(40, 1060, 140, BUTTON_H)), "<", "ghost", {"enabled": camp_selected > 0}))
 		list.append(make_button("move_right", bottom_rect(Rect2(196, 1060, 140, BUTTON_H)), ">", "ghost", {"enabled": camp_selected < held - 1}))
@@ -1345,8 +1561,16 @@ func base_dialog_card(id: String) -> Rect2:
 			return Rect2(50, 110, 620, 1060)
 		"help":
 			return Rect2(50, 110, 620, 1060)
-		"result", "run_over":
+		"result":
 			return Rect2(70, 230, 580, 820)
+		"run_over":
+			return Rect2(70, 150, 580, 980)
+		"rune":
+			return Rect2(90, 400, 540, 480)
+		"line_choice":
+			return Rect2(90, 430, 540, 440)
+		"codex":
+			return Rect2(30, 50, 660, 1180)
 		"intro":
 			return Rect2(70, 250, 580, 760)
 		"round_won":
@@ -1383,9 +1607,34 @@ func dialog_buttons(id: String) -> Array:
 			return [make_button("home", Rect2(x, card.end.y - 120, half, BUTTON_H), "HOME", "ghost"),
 				make_button("next", Rect2(x + half + 20, card.end.y - 120, half, BUTTON_H), "NEXT TRAIL", "primary")]
 		"run_over":
+			if run != null and run.kind == "daily":
+				return [make_button("home", Rect2(x, card.end.y - 120, width, BUTTON_H), "HOME", "primary")]
 			var half: float = (width - 20) * 0.5
 			return [make_button("home", Rect2(x, card.end.y - 120, half, BUTTON_H), "HOME", "ghost"),
 				make_button("run_again", Rect2(x + half + 20, card.end.y - 120, half, BUTTON_H), "NEW RUN", "primary")]
+		"rune":
+			var half_rune: float = (width - 20) * 0.5
+			return [make_button("cancel_rune", Rect2(x, card.end.y - 120, half_rune, BUTTON_H), "CANCEL", "ghost"),
+				make_button("use_rune", Rect2(x + half_rune + 20, card.end.y - 120, half_rune, BUTTON_H), "USE", "primary", {"enabled": rune_usable(rune_dialog_index)})]
+		"line_choice":
+			var half_line: float = (width - 20) * 0.5
+			return [make_button("line:row", Rect2(x, card.end.y - 232, half_line, BUTTON_H), "ROW", "primary"),
+				make_button("line:col", Rect2(x + half_line + 20, card.end.y - 232, half_line, BUTTON_H), "COLUMN", "primary"),
+				make_button("cancel_rune", Rect2(x, card.end.y - 120, width, BUTTON_H), "CANCEL", "ghost")]
+		"codex":
+			var codex_list: Array = []
+			var tabs: Array = [["talismans", "TALISMANS"], ["runes", "RUNES"], ["hazards", "HAZARDS"]]
+			var tab_w: float = (card.size.x - 60 - 20) / 3.0
+			for i in range(tabs.size()):
+				codex_list.append(make_button("tab:" + tabs[i][0], Rect2(card.position.x + 30 + i * (tab_w + 10), card.position.y + 104, tab_w, BUTTON_H),
+					tabs[i][1], "tab", {"active": codex_tab == tabs[i][0], "size": 21}))
+			var entries: Array = codex_entries(codex_tab)
+			for i in range(entries.size()):
+				var cell = Rect2(card.position.x + 30 + (i % 6) * 100, card.position.y + 216 + (i / 6) * 100, 96, 96)
+				codex_list.append(make_button("codex:" + entries[i], cell, "", "codex_cell",
+					{"entry": entries[i], "found": profile.discovered.has(entries[i]), "selected": codex_pick == entries[i]}))
+			codex_list.append(make_button("done", Rect2(x, card.end.y - 120, width, BUTTON_H), "DONE", "primary"))
+			return codex_list
 		"intro":
 			return [make_button("begin", Rect2(x, card.end.y - 120, width, BUTTON_H), "BEGIN", "primary")]
 		"round_won":
@@ -1397,6 +1646,32 @@ func dialog_buttons(id: String) -> Array:
 	var half_width: float = (width - 20) * 0.5
 	return [make_button("cancel", Rect2(x, card.end.y - 120, half_width, BUTTON_H), "CANCEL", "ghost"),
 		make_button(id, Rect2(x + half_width + 20, card.end.y - 120, half_width, BUTTON_H), confirm_label, "danger" if id != "confirm_exit" else "primary")]
+
+## Codex entries for a tab, in a stable order.
+func codex_entries(tab: String) -> Array:
+	if tab == "runes":
+		return Runes.ids()
+	if tab == "hazards":
+		return Encounters.WEATHER_IDS + Encounters.GUARDIAN_IDS + ["summit_warden"]
+	var list: Array = []
+	for rarity in range(4):
+		list.append_array(Talismans.ids_of_rarity(rarity))
+	return list
+
+## Codex name and text for any entry.
+func codex_info(id: String) -> Dictionary:
+	if Talismans.exists(id):
+		var info: Dictionary = Talismans.info(id)
+		return {"name": info.name, "code": info.code, "text": info.text, "kind": "%s talisman" % Talismans.RARITY_NAMES[int(info.rarity)], "color": Talismans.color(id)}
+	if Runes.exists(id):
+		var rune: Dictionary = Runes.info(id)
+		return {"name": rune.name, "code": rune.code, "text": rune.text, "kind": "Rune", "color": Runes.COLOR}
+	var weather: bool = Encounters.WEATHERS.has(id)
+	var name: String = Encounters.hazard_name(id)
+	var words: PackedStringArray = name.replace("The ", "").split(" ")
+	var code: String = words[0].substr(0, 1) + (words[1].substr(0, 1) if words.size() > 1 else words[0].substr(1, 1))
+	return {"name": name, "code": code.to_upper(), "text": Encounters.hazard_text(id), "kind": "Weather" if weather else "Guardian",
+		"color": Color("7bbde2") if weather else CORAL}
 
 func button_at(point: Vector2) -> Dictionary:
 	for entry in current_buttons():
@@ -1563,8 +1838,28 @@ func draw_button(entry: Dictionary) -> void:
 	var pressed: bool = pointer_down and press_kind == "button" and press_id == entry.id
 	if pressed:
 		rect = rect.grow(-3)
-	var kind: String = entry.kind if enabled or entry.kind == "offer" else "disabled"
+	var kind: String = entry.kind if enabled or entry.kind == "offer" or entry.kind == "rune_offer" else "disabled"
 	match kind:
+		"rune":
+			draw_rune_badge(rect.grow(-4), entry.rune)
+			if entry.get("selected", false):
+				canvas.draw_style_box(panel(Color.TRANSPARENT, int(rect.size.y * 0.5), GOLD, 4), rect)
+		"rune_offer":
+			draw_rune_offer(entry, rect, enabled)
+		"codex_cell":
+			var info: Dictionary = codex_info(entry.entry)
+			if entry.found:
+				canvas.draw_style_box(panel(info.color, 16, with_alpha(CREAM, 0.6), 2), rect.grow(-4))
+				centered(info.code, rect, 30, INK, true)
+			else:
+				canvas.draw_style_box(panel(DEEP, 16, EDGE, 1), rect.grow(-4))
+				centered("?", rect, 34, with_alpha(MUTED, 0.6), true)
+			if entry.get("selected", false):
+				canvas.draw_style_box(panel(Color.TRANSPARENT, 18, GOLD, 4), rect)
+		"tab":
+			var active: bool = entry.get("active", false)
+			canvas.draw_style_box(panel(EDGE if active else CARD, 18, GOLD if active else EDGE, 2 if active else 1), rect)
+			centered(entry.label, rect, entry.get("size", 22), GOLD if active else MUTED, true)
 		"card":
 			draw_talisman_card(entry, rect)
 		"offer":
@@ -1580,16 +1875,16 @@ func draw_button(entry: Dictionary) -> void:
 			canvas.draw_style_box(panel(CREAM.darkened(0.08) if pressed else CREAM, 18), rect)
 			centered(entry.label, rect if not entry.has("sub") else Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.62)), 28, INK, true)
 			if entry.has("sub"):
-				centered(entry.sub, Rect2(rect.position + Vector2(0, rect.size.y * 0.5), Vector2(rect.size.x, rect.size.y * 0.42)), 20, EDGE)
+				centered(fit_text(entry.sub, rect.size.x - 28, 19), Rect2(rect.position + Vector2(0, rect.size.y * 0.5), Vector2(rect.size.x, rect.size.y * 0.42)), 19, EDGE)
 		"secondary":
 			canvas.draw_style_box(panel(EDGE, 18, GOLD, 2), rect)
-			centered(entry.label, rect, 26, GOLD, true)
+			centered(entry.label, rect, entry.get("size", 26), GOLD, true)
 		"danger":
 			canvas.draw_style_box(panel(Color("3a3436"), 18, CORAL, 2), rect)
 			centered(entry.label, rect, 24, CORAL, true)
 		"disabled":
 			canvas.draw_style_box(panel(Color("213c40"), 18, with_alpha(MUTED, 0.5), 1), rect)
-			centered(entry.label, rect, 26, MUTED, true)
+			centered(entry.label, rect, entry.get("size", 26), MUTED, true)
 		"icon":
 			rect = rect.grow(-8)
 			canvas.draw_style_box(panel(CARD, 20, EDGE, 2), rect)
@@ -1607,7 +1902,7 @@ func draw_button(entry: Dictionary) -> void:
 			canvas.draw_style_box(panel(CREAM if entry.value else MUTED, 18), Rect2(knob_x, track.position.y + 4, 36, 36))
 		_:
 			canvas.draw_style_box(panel(CARD, 18, EDGE, 2), rect)
-			centered(entry.label, rect, 25, CREAM, true)
+			centered(entry.label, rect, entry.get("size", 25), CREAM, true)
 
 ## A talisman's badge: archetype colour, rarity rim and its two letters.
 func draw_badge(rect: Rect2, id: String, alpha: float = 1.0) -> void:
@@ -1647,6 +1942,26 @@ func draw_offer(entry: Dictionary, rect: Rect2, enabled: bool) -> void:
 	canvas.draw_style_box(panel(GOLD if enabled else Color("3a3436"), 16, GOLD if enabled else CORAL, 2), tag)
 	draw_coin(tag.position + Vector2(34, 36), 15)
 	label_at(entry.tag, tag.position + Vector2(58, 47), 30, INK if enabled else CORAL, true)
+
+## A rune's badge: round (talismans are square), violet, or the element's
+## colour for Dyes.
+func draw_rune_badge(rect: Rect2, id: String, alpha: float = 1.0) -> void:
+	var info: Dictionary = Runes.info(id)
+	var color: Color = COLORS[int(info.element)] if info.has("element") else Runes.COLOR
+	canvas.draw_style_box(panel(with_alpha(color, alpha), int(minf(rect.size.x, rect.size.y) * 0.5), with_alpha(CREAM, 0.7 * alpha), 3), rect)
+	centered(info.code, rect, int(clampf(minf(rect.size.x, rect.size.y) * 0.36, 12, 36)), with_alpha(INK, alpha), true)
+
+func draw_rune_offer(entry: Dictionary, rect: Rect2, enabled: bool) -> void:
+	var sold: bool = entry.tag == "SOLD"
+	canvas.draw_style_box(panel(CARD, 18, with_alpha(Runes.COLOR, 0.6), 1), rect)
+	draw_rune_badge(Rect2(rect.position + Vector2(10, 14), Vector2(68, 68)), entry.rune, 0.45 if sold else 1.0)
+	var name: String = Runes.info(entry.rune).name.replace("Rune of ", "")
+	label_at(fit_text(name, rect.size.x - 96, 20, true), rect.position + Vector2(88, 40), 20, with_alpha(CREAM, 0.45 if sold else 1.0), true)
+	if sold or entry.tag == "FULL":
+		label_at(entry.tag, rect.position + Vector2(88, 74), 18, MUTED, true)
+		return
+	draw_coin(rect.position + Vector2(100, 66), 11)
+	label_at(entry.tag, rect.position + Vector2(118, 75), 22, GOLD if enabled else CORAL, true)
 
 func draw_coin(center: Vector2, radius: float) -> void:
 	canvas.draw_circle(center, radius, GOLD.darkened(0.15))
@@ -1719,8 +2034,9 @@ func paint_chrome() -> void:
 		return
 	paint_backdrop()
 	canvas.draw_set_transform(Vector2(0, zone_top))
-	canvas.draw_colored_polygon(PackedVector2Array([Vector2(330, 116), Vector2(455, 22), Vector2(590, 116)]), Color("264b4e"))
-	canvas.draw_colored_polygon(PackedVector2Array([Vector2(433, 39), Vector2(455, 22), Vector2(479, 40), Vector2(456, 34)]), CREAM.darkened(0.18))
+	if mode != RUN:
+		canvas.draw_colored_polygon(PackedVector2Array([Vector2(330, 116), Vector2(455, 22), Vector2(590, 116)]), Color("264b4e"))
+		canvas.draw_colored_polygon(PackedVector2Array([Vector2(433, 39), Vector2(455, 22), Vector2(479, 40), Vector2(456, 34)]), CREAM.darkened(0.18))
 	if mode == RUN and run != null:
 		label_at("FLOOR %d  /  %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage].to_upper()], Vector2(40, 62), 24, GOLD, true)
 		var subtitle: String = Encounters.FLOOR_NAMES[run.floor_index]
@@ -1799,12 +2115,20 @@ func paint_home() -> void:
 	centered("A little higher.", Rect2(0, 652, 720, 44), 28, GOLD)
 	var stats_rect = Rect2(80, 704, 560, 104)
 	canvas.draw_style_box(panel(CARD, 20, EDGE, 1), stats_rect)
-	var stats = [["BEST FLOOR", str(profile.best_floor)], ["SUMMITS", str(profile.summits)],
-		["RUNS", str(profile.runs_played)], ["BEST TRAIL", fmt_int(profile.best_score)]]
+	var stats = [["LEVEL", str(profile.level())], ["BEST FLOOR", str(profile.best_floor)],
+		["SUMMITS", str(profile.summits)], ["RUNS", str(profile.runs_played)]]
+	# Progress to the next level along the card's bottom edge.
+	var level: int = profile.level()
+	var from_xp: int = Progression.xp_for_level(level)
+	var to_xp: int = Progression.xp_for_level(level + 1)
+	var share: float = 1.0 if level >= Progression.MAX_LEVEL else clampf(float(profile.xp - from_xp) / maxf(1.0, to_xp - from_xp), 0.0, 1.0)
+	canvas.draw_style_box(panel(EDGE, 3), Rect2(stats_rect.position.x + 20, stats_rect.end.y - 12, stats_rect.size.x - 40, 6))
+	if share > 0.0:
+		canvas.draw_style_box(panel(GOLD, 3), Rect2(stats_rect.position.x + 20, stats_rect.end.y - 12, maxf(6.0, (stats_rect.size.x - 40) * share), 6))
 	for i in range(stats.size()):
 		var column = Rect2(stats_rect.position.x + i * 140, stats_rect.position.y, 140, stats_rect.size.y)
 		centered(stats[i][1], Rect2(column.position + Vector2(0, 8), Vector2(column.size.x, 56)), 36, CREAM, true)
-		centered(stats[i][0], Rect2(column.position + Vector2(0, 60), Vector2(column.size.x, 30)), 18, MUTED)
+		centered(stats[i][0], Rect2(column.position + Vector2(0, 58), Vector2(column.size.x, 30)), 18, MUTED)
 	canvas.draw_set_transform(Vector2.ZERO)
 	centered("v%s  -  plays fully offline" % ProjectSettings.get_setting("application/config/version", ""), bottom_rect(Rect2(0, 1196, 720, 40)), 18, with_alpha(MUTED, 0.7))
 
@@ -1851,6 +2175,8 @@ func paint_play_hud() -> void:
 	var playing: bool = round_state.status == Model.PLAYING
 	canvas.draw_set_transform(Vector2(0, zone_top))
 	if mode == RUN and run != null:
+		for i in range(run.runes.size(), Runes.SLOTS):
+			canvas.draw_style_box(panel(DEEP, 40, with_alpha(Runes.COLOR, 0.35), 2), Rect2(380 + i * 104, 20, 96, 96).grow(-8))
 		var coin_text: String = fmt_int(run.coins + round_state.coins_found)
 		right_aligned(coin_text, 656, 166, 24, GOLD, true)
 		draw_coin(Vector2(656 - text_width(coin_text, 24, true) - 20, 158), 11)
@@ -1890,6 +2216,8 @@ func paint_camp() -> void:
 		label_at("Choose one, or skip it for +%d Coins." % Run.SKIP_COINS if run.has_room() else "Slots full: pick a card, then a talisman to swap out.", Vector2(40, 196), 20, MUTED)
 	else:
 		label_at("TRADER", Vector2(40, 170), 26, GOLD, true)
+		for i in range(run.runes.size(), Runes.SLOTS):
+			canvas.draw_style_box(panel(DEEP, 40, with_alpha(Runes.COLOR, 0.35), 2), Rect2(488 + i * 102, 704, 90, 96).grow(-4))
 		label_at("Coins kept earn +1 per 5 (max 5) each round.", Vector2(40, 206), 19, MUTED)
 		if run.reward.has("total"):
 			label_at("Last round: +%d Coins" % run.reward.total, Vector2(40, 232), 18, with_alpha(MUTED, 0.8))
@@ -1950,6 +2278,10 @@ func paint_round_panel(rect: Rect2) -> void:
 		panel_row("Rerolls", str(round_state.rerolls), x, x + width, y + 72)
 		panel_row("Coins", fmt_int(run.coins + round_state.coins_found), x, x + width, y + 108)
 		panel_row("Rounds won", str(run.rounds_won), x, x + width, y + 144)
+		panel_row("Altitude", str(run.altitude), x, x + width, y + 180)
+		for i in range(run.runes.size()):
+			draw_rune_badge(Rect2(x, y + 210 + i * 64, 52, 52), run.runes[i])
+			label_at(fit_text(Runes.info(run.runes[i]).name, width - 64, 17, true), Vector2(x + 64, y + 242 + i * 64), 17, CREAM, true)
 	else:
 		label_at("QUICK TRAIL", Vector2(x, y), 28, CREAM, true)
 		y += 46
@@ -2129,12 +2461,21 @@ func paint_overlay() -> void:
 			paint_run_over(card, inner)
 		"talismans":
 			paint_talisman_list(card, inner)
+		"rune":
+			paint_rune_dialog(card, inner)
+		"line_choice":
+			var cell: Vector2i = rune_targeting.get("cell", Vector2i.ZERO)
+			centered("SHATTER WHICH LINE?", Rect2(card.position.x, top + 34, card.size.x, 56), 32, CREAM, true)
+			wrapped("Row %d or column %d through the cell you tapped. Everything in it is destroyed, Stones too. Your streak is kept." % [cell.y + 1, cell.x + 1],
+				Vector2(inner.position.x, top + 100), inner.size.x, 21, MUTED)
+		"codex":
+			paint_codex(card, inner)
 		_:
 			var titles = {"confirm_new": "Start a new trail?", "confirm_exit": "Leave Summit Shards?", "confirm_reset": "Reset statistics?",
 				"confirm_run_new": "Start a new expedition?", "confirm_abandon": "Abandon this expedition?"}
 			var bodies = {"confirm_new": "This trail ends here and counts as played.",
 				"confirm_exit": "Your game is saved. Pick up where you left off next time.",
-				"confirm_reset": "Best floor, summits, runs and trail records go back to zero. Your games in progress and settings stay.",
+				"confirm_reset": "Best floor, summits, runs and trail records go back to zero. Your level, Codex, Altitudes, games in progress and settings stay.",
 				"confirm_run_new": "Your current expedition ends here and counts as a run.",
 				"confirm_abandon": "The expedition ends here and counts as a run. Your talismans are lost."}
 			centered(titles.get(id, ""), Rect2(card.position.x, top + 34, card.size.x, 60), 36, CREAM, true)
@@ -2149,7 +2490,12 @@ func paint_intro(card: Rect2, inner: Rect2) -> void:
 	var top: float = card.position.y
 	var guardian: bool = run.stage == Encounters.GUARDIAN
 	centered("FLOOR %d  /  %s" % [run.floor_reached(), Encounters.STAGE_NAMES[run.stage].to_upper()], Rect2(card.position.x, top + 30, card.size.x, 50), 32, CORAL if guardian else GOLD, true)
-	centered(Encounters.FLOOR_NAMES[run.floor_index], Rect2(card.position.x, top + 80, card.size.x, 34), 22, MUTED)
+	var place: String = Encounters.FLOOR_NAMES[run.floor_index]
+	if run.kind == "daily":
+		place = "Daily Climb  -  " + place
+	elif run.altitude > 0:
+		place = "Altitude %d  -  %s" % [run.altitude, place]
+	centered(place, Rect2(card.position.x, top + 80, card.size.x, 34), 22, MUTED)
 	centered("TARGET", Rect2(card.position.x, top + 128, card.size.x, 30), 20, MUTED)
 	centered(fmt_int(run.round.target), Rect2(card.position.x, top + 150, card.size.x, 90), 76, CREAM, true)
 	centered("%d trays  -  %d %s  -  %d talismans" % [run.round.max_trays, run.round.rerolls, "reroll" if run.round.rerolls == 1 else "rerolls", run.talismans.size()],
@@ -2196,7 +2542,8 @@ func paint_round_won(card: Rect2, inner: Rect2) -> void:
 func paint_run_over(card: Rect2, inner: Rect2) -> void:
 	var top: float = card.position.y
 	var won: bool = run.phase == Run.WON
-	centered("SUMMIT REACHED" if won else "EXPEDITION ENDS", Rect2(card.position.x, top + 34, card.size.x, 60), 40, GOLD if won else CREAM, true)
+	var title: String = "SUMMIT REACHED" if won else ("DAILY CLIMB ENDS" if run.kind == "daily" else "EXPEDITION ENDS")
+	centered(title, Rect2(card.position.x, top + 34, card.size.x, 60), 40, GOLD if won else CREAM, true)
 	centered("All eight floors climbed." if won else "%s  -  Floor %d %s" % [Encounters.FLOOR_NAMES[run.floor_index], run.floor_reached(), Encounters.STAGE_NAMES[run.stage]],
 		Rect2(card.position.x, top + 96, card.size.x, 36), 21, MUTED)
 	centered("SUMMIT" if won else "FLOOR %d" % run.floor_reached(), Rect2(card.position.x, top + 140, card.size.x, 110), 80, CREAM, true)
@@ -2216,6 +2563,72 @@ func paint_run_over(card: Rect2, inner: Rect2) -> void:
 		label_at("No talismans", Vector2(inner.position.x, badge_y + 40), 21, MUTED)
 	for slot in range(run.talismans.size()):
 		draw_badge(chip_rect(Rect2(inner.position.x, badge_y + 14, inner.size.x, 70), slot, maxi(5, run.talismans.size()), 70), run.talismans[slot])
+	paint_xp_block(Rect2(inner.position.x, top + 650, inner.size.x, 190))
+
+## XP earned, the level bar and anything newly unlocked.
+func paint_xp_block(area: Rect2) -> void:
+	if last_run_summary.is_empty():
+		return
+	var level: int = profile.level()
+	canvas.draw_style_box(panel(DEEP, 16), area)
+	label_at("+%d XP" % int(last_run_summary.get("xp", 0)), area.position + Vector2(20, 42), 30, GOLD, true)
+	right_aligned("LEVEL %d" % level, area.end.x - 20, area.position.y + 42, 26, CREAM, true)
+	var from_xp: int = Progression.xp_for_level(level)
+	var to_xp: int = Progression.xp_for_level(level + 1)
+	var share: float = clampf(float(profile.xp - from_xp) / maxf(1.0, to_xp - from_xp), 0.0, 1.0)
+	var bar = Rect2(area.position + Vector2(20, 60), Vector2(area.size.x - 40, 10))
+	canvas.draw_style_box(panel(EDGE, 5), bar)
+	canvas.draw_style_box(panel(GOLD, 5), Rect2(bar.position, Vector2(maxf(10.0, bar.size.x * share), bar.size.y)))
+	var news: Array = []
+	if int(last_run_summary.get("level", level)) > int(last_run_summary.get("level_before", level)):
+		news.append("Level up!")
+	if last_run_summary.get("altitude_unlocked", false):
+		news.append("Altitude %d unlocked." % profile.max_altitude)
+	var unlocks: Array = last_run_summary.get("unlocks", [])
+	if not unlocks.is_empty():
+		news.append("New: " + ", ".join(unlocks) + ".")
+	if news.is_empty():
+		news.append("%d XP to level %d." % [maxi(0, to_xp - profile.xp), level + 1])
+	wrapped(" ".join(news), area.position + Vector2(20, 82), area.size.x - 40, 19, CREAM)
+
+func paint_rune_dialog(card: Rect2, inner: Rect2) -> void:
+	if run == null or rune_dialog_index < 0 or rune_dialog_index >= run.runes.size():
+		return
+	var top: float = card.position.y
+	var id: String = run.runes[rune_dialog_index]
+	var info: Dictionary = Runes.info(id)
+	draw_rune_badge(Rect2(card.get_center().x - 52, top + 30, 104, 104), id)
+	centered(info.name, Rect2(card.position.x, top + 146, card.size.x, 44), 32, CREAM, true)
+	wrapped(info.text, Vector2(inner.position.x, top + 196), inner.size.x, 23, CREAM)
+	var status: String = "Ready to use."
+	if not rune_usable(rune_dialog_index):
+		status = "Use it during a round." if id != "rune_wealth" else "Use it during a round or at Camp."
+	elif info.target == "line":
+		status = "Then tap a cell to choose its row or column."
+	elif info.target == "slot":
+		status = "Then tap the shard to shrink."
+	wrapped(status, Vector2(inner.position.x, top + 290), inner.size.x, 20, GOLD if rune_usable(rune_dialog_index) else MUTED)
+
+## The Codex: every talisman, rune, weather and Guardian, discovered or not.
+func paint_codex(card: Rect2, inner: Rect2) -> void:
+	var top: float = card.position.y
+	var all: Array = codex_entries("talismans") + codex_entries("runes") + codex_entries("hazards")
+	var found: int = all.filter(func(id): return profile.discovered.has(id)).size()
+	centered("CODEX", Rect2(card.position.x, top + 24, card.size.x, 50), 40, CREAM, true)
+	centered("%d / %d discovered  -  +%d XP for each new find" % [found, all.size(), Progression.XP_DISCOVERY], Rect2(card.position.x, top + 68, card.size.x, 30), 19, MUTED)
+	var rows: int = int(ceil(codex_entries(codex_tab).size() / 6.0))
+	var detail_y: float = top + 230 + rows * 100
+	if codex_pick == "":
+		wrapped("Tap an entry. Talismans and runes appear here once you hold them; weather and Guardians once you meet them.", Vector2(inner.position.x - 10, detail_y), inner.size.x + 20, 20, MUTED)
+		return
+	var info: Dictionary = codex_info(codex_pick)
+	if not profile.discovered.has(codex_pick):
+		label_at("Undiscovered %s" % info.kind.to_lower(), Vector2(inner.position.x - 10, detail_y + 26), 24, MUTED, true)
+		wrapped("Find it on an expedition to read it here.", Vector2(inner.position.x - 10, detail_y + 36), inner.size.x + 20, 20, MUTED)
+		return
+	label_at(info.name, Vector2(inner.position.x - 10, detail_y + 26), 26, CREAM, true)
+	label_at(info.kind, Vector2(inner.position.x - 10, detail_y + 56), 18, GOLD)
+	wrapped(info.text, Vector2(inner.position.x - 10, detail_y + 64), inner.size.x + 20, 21, CREAM)
 
 ## Every held talisman with its rule, in slot order (the order xMult uses).
 func paint_talisman_list(card: Rect2, inner: Rect2) -> void:
@@ -2252,27 +2665,39 @@ func save_active() -> bool:
 func save_run() -> bool:
 	if run == null:
 		return false
-	return Store.write(run_path, run.snapshot())
+	return Store.write(daily_path if run.kind == "daily" else run_path, run.snapshot())
 
-## Loads a saved expedition. A run saved between a finished round and its
-## settlement is settled now; a finished run is counted once.
+## Loads the saved expedition and Daily Climb. A run saved between a finished
+## round and its settlement is settled now; a finished run is counted once.
 func load_run() -> bool:
-	var data: Dictionary = Store.read(run_path)
-	if data.is_empty():
-		return false
-	var restored = Run.new(1)
-	if not restored.restore_snapshot(data):
-		return false
-	run = restored
-	if run.phase == Run.ROUND and run.round.status != Model.PLAYING:
-		run.after_round_command()
-		save_run()
-	if run.phase == Run.WON or run.phase == Run.LOST:
-		record_run()
-	return true
+	var loaded: bool = false
+	for kind in ["daily", "expedition"]:
+		var data: Dictionary = Store.read(daily_path if kind == "daily" else run_path)
+		if data.is_empty():
+			continue
+		var restored = Run.new(1)
+		if not restored.restore_snapshot(data) or restored.kind != kind:
+			continue
+		if kind == "daily":
+			daily_run = restored
+		else:
+			expedition_run = restored
+		run = restored
+		loaded = true
+		if run.phase == Run.ROUND and run.round.status != Model.PLAYING:
+			run.after_round_command()
+			save_run()
+		if run.phase == Run.WON or run.phase == Run.LOST:
+			record_run()
+	run = expedition_run if expedition_run != null else daily_run
+	return loaded
 
+## An expedition (not a Daily Climb) in progress.
 func run_active() -> bool:
-	return run != null and run.phase != Run.WON and run.phase != Run.LOST
+	return expedition_run != null and expedition_run.phase != Run.WON and expedition_run.phase != Run.LOST
+
+func daily_active() -> bool:
+	return daily_run != null and daily_run.phase != Run.WON and daily_run.phase != Run.LOST
 
 func save_round() -> bool:
 	if quick_round == null:
