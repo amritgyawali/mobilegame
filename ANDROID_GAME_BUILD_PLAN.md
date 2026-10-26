@@ -31,10 +31,12 @@ Already implemented and checked:
 - [x] Cached drawing styles, conditional hover redraw, 60 FPS cap, low-processor mode and normal Android screen timeout.
 - [x] Pause/focus save coalescing, backup repair, and Back cancelling a selected piece before saved exit from the current single-screen prototype.
 - [x] Native automated rules and scene checks; APK export and signature/archive/manifest checks.
+- [x] Any device shape (0.4.0-dev): responsive top/middle/bottom zones for tall phones, side scenery and side panels for wide screens (tablets, foldables, split-screen), adaptive effect quality from measured frame times, an opt-in Smooth 90/120 Hz setting, and an automated 9-shape layout sweep. Device and refresh-rate behavior on hardware is still pending.
+- [x] Expedition (0.3.0-dev): 8 floors x Trail/Ridge/Guardian with the design's targets; Camp with free draft or +3 Coins, Trader, reroll, sell and reorder; Coins, unused-tray rewards and interest; 36 of the 48 launch talismans; Stone hazards; 5 weathers and 7 Guardians (simplified Summit Warden); Firebird; run saves and profile stats; Quick Trail kept. Bot balance: floors 3-4 (weak) and 5-6 (greedy), ~8% summits. Not yet: runes, Forge and bonus tiles, Frozen/Ember/Fog hazards, the other 3 weathers and 5 Guardians, 12 talismans, climbers, Altitudes, XP and unlocks.
 - [x] Smoothness pass (0.2.1-dev): layered drawing so motion moves layers instead of repainting; low-processor mode lifted only while animating or dragging; sound synthesis off the main thread; font cache warm-up; expand aspect for tall/wide screens; themed launch screen; cached layout. Desktop drawing-cost measurements are in `docs/SETUP_STATUS.md`; phone traces are still pending.
 - [x] Phase 1 shell (0.2.0-dev): Home, How to Play, Pause, Settings, Result and confirmation dialogs; Back hierarchy; drag-to-place with tap placement retained; separate settings and profile saves; abandon confirmation; animations, sound effects and Reduced Motion. Device checks for this phase are still pending.
 
-Still to build: the full run, Camp, draft/shop/Forge, equipped talismans, runes, special tiles, weather, Guardians, climbers, progression, tutorial, final art/audio, settings, localization and release workflow. A working starter is not evidence that those systems exist.
+Still to build: runes, the Forge and bonus tiles; Frozen, Ember and Fog hazards; the remaining weathers, Guardians and 12 talismans; climbers, Altitudes, Expedition XP and unlocks; an interactive tutorial; final art and audio; localization; and the release workflow. Systems not listed as implemented above do not exist yet.
 
 Real-device performance, battery, touch feel, lifecycle behavior and accessibility remain unverified until measured on Android hardware.
 

@@ -4,16 +4,23 @@ extends RefCounted
 ## a score, a save or a move. Every list is capped.
 
 const MAX_PARTICLES = 144
+## Quality levels set by the scene's frame-time monitor.
+const FULL = 2
+const LITE = 1
+const LITE_MAX_PARTICLES = 48
 const MAX_TEXTS = 6
 const POP_TIME = 0.18
 const CLEAR_TIME = 0.38
 
 var time: float = 0.0
 var reduced_motion: bool = false
+var quality: int = FULL
 var pops: Dictionary = {}       # board index -> start time
 var clears: Array = []          # {index, element, start}
 var particles: Array = []       # {pos, vel, color, start, life, size}
 var texts: Array = []           # {text, pos, color, size, start, life, rise}
+var flashes: Dictionary = {}    # talisman slot -> start time
+const FLASH_TIME = 0.6
 var shake_start: float = -10.0
 var shake_strength: float = 0.0
 var _rng = RandomNumberGenerator.new()
@@ -23,13 +30,14 @@ func _init() -> void:
 
 func active() -> bool:
 	return not pops.is_empty() or not clears.is_empty() or not particles.is_empty() \
-		or not texts.is_empty() or time - shake_start < 0.3
+		or not texts.is_empty() or not flashes.is_empty() or time - shake_start < 0.3
 
 func clear_all() -> void:
 	pops.clear()
 	clears.clear()
 	particles.clear()
 	texts.clear()
+	flashes.clear()
 	shake_start = -10.0
 
 func update(delta: float) -> void:
@@ -40,6 +48,19 @@ func update(delta: float) -> void:
 	clears = clears.filter(func(c): return time - c.start < CLEAR_TIME)
 	particles = particles.filter(func(p): return time - p.start < p.life)
 	texts = texts.filter(func(t): return time - t.start < t.life)
+	for slot in flashes.keys():
+		if time - flashes[slot] > FLASH_TIME:
+			flashes.erase(slot)
+
+## Lights up a talisman slot that changed a score. Kept with reduced motion:
+## it carries information, and it fades rather than moves.
+func add_flash(slot: int) -> void:
+	flashes[slot] = time
+
+func flash_alpha(slot: int) -> float:
+	if not flashes.has(slot):
+		return 0.0
+	return clampf(1.0 - (time - flashes[slot]) / FLASH_TIME, 0.0, 1.0)
 
 func add_pop(indices: Array) -> void:
 	if reduced_motion:
@@ -58,8 +79,9 @@ func add_clear(index: int, element: int, center: Vector2, color: Color) -> void:
 	clears.append({"index": index, "element": element, "start": time})
 	if reduced_motion:
 		return
-	for i in range(3):
-		if particles.size() >= MAX_PARTICLES:
+	var limit: int = MAX_PARTICLES if quality == FULL else LITE_MAX_PARTICLES
+	for i in range(3 if quality == FULL else 1):
+		while particles.size() >= limit:
 			particles.pop_front()
 		var angle: float = _rng.randf_range(0.0, TAU)
 		var speed: float = _rng.randf_range(140.0, 420.0)
