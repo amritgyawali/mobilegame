@@ -23,7 +23,7 @@ func _initialize() -> void:
 	call_deferred("run")
 
 func cleanup() -> void:
-	for path in [ROUND_PATH, SETTINGS_PATH, PROFILE_PATH]:
+	for path in [ROUND_PATH, SETTINGS_PATH, PROFILE_PATH, PROFILE_PATH + ".run", PROFILE_PATH + ".daily"]:
 		Store.remove(path)
 
 func ids() -> Array:
@@ -61,6 +61,8 @@ func make_app() -> void:
 	app.save_path = ROUND_PATH
 	app.settings_path = SETTINGS_PATH
 	app.profile_path = PROFILE_PATH
+	app.run_path = PROFILE_PATH + ".run"
+	app.daily_path = PROFILE_PATH + ".daily"
 	app.fixed_seed = 4100
 	root.add_child(app)
 	await process_frame

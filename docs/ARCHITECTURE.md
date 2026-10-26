@@ -26,6 +26,16 @@ Presentation: a move is committed and saved before it is animated. `ui/effects.g
 
 Back cancels a drag or selection, then closes the top dialog, then opens Pause during play, and on Home asks before exiting. Pause/focus loss save; app pause mid-round also opens Pause. Resume/focus return redraw to recalculate safe areas.
 
+## Runes, Altitudes and progression (0.5.0-dev)
+
+Runes (`content/runes.gd`) are held by the run (two slots) and bought from `run.rune_shop` (two distinct unlocked runes per Camp, rerolled with the Trader). `run.use_rune(index, target)` spends a rune only if it acted: Wealth changes run Coins (Camp or round); the others call `round.use_rune(id, target)`, which validates and applies all-or-nothing (Shattering needs a non-empty row/column, Thaw needs Stones, Shrinking a larger shard, a Dye a change; Echo cannot stack). Echo doubles the next placement inside `evaluate()`, so the preview shows it; Stillness keeps the streak for 3 placements. Both are saved in the round's `counters`. `round.rescue_runes` (set by the run from held Shattering/Shrinking runes, not saved) keeps a blocked round PLAYING until the rune is used; after use the run re-checks the block.
+
+Altitudes (0-10) live on the run and are applied in `target()`, `round_rules()` (Ridge Stones, a second Guardian rule from a seed-mixed pick, the Altitude 10 `fixed_disabled` slot), `round_trays()`, `round_rerolls()`, `price()`/`rune_price()`, `draft_size()` and `interest_cap()`. Offers draw only from `talisman_pool`/`rune_pool`, the unlocked ids passed at run start and saved with the run, so later unlocks never change a run in progress. All new run fields are optional in saves (0.3/0.4 runs load as Altitude 0 with everything available).
+
+The profile holds XP (level from `Progression.level_for_xp`), the Codex (`discovered`, +15 XP per first find), `max_altitude`/`chosen_altitude` and the Daily Climb (`daily_date`, result). `record_run()` awards rounds, Guardians and summit XP once per run seed, unlocks the next Altitude after a summit at the highest one, and returns a summary for the results screen. Reset statistics keeps progression.
+
+The scene keeps two run slots, `expedition_run` (`user://run-v1.json`) and `daily_run` (`user://daily-v1.json`); `run` points at the one being played. A Daily Climb seeds from the local date (`daily_seed`), passes every talisman and rune so the run is the same for everyone, and consumes the day's attempt when it starts. Rune targeting is a small state (`rune_targeting`): a tap on the board opens the row/column choice for Shattering, a tap on a tray shard applies Shrinking, anything else or Back cancels and keeps the rune.
+
 ## Expedition (0.3.0-dev)
 
 `run_model.gd` (RefCounted, pure) owns the run: floor (0-7), stage (Trail, Ridge, Guardian), phase (`intro`, `round`, `camp`, `won`, `lost`), Coins, talismans in slot order, the current round, Camp offers and counters that persist across rounds (Snowball stacks, Eternal Glacier lines). `after_round_command()` settles a finished round exactly once: rewards and Camp, the summit, a Firebird restart, or the end of the run. The scene saves the run (`user://run-v1.json`, checksummed with a backup) after every command. A run saved between a finished round and its settlement is settled on load; a finished run is recorded in the profile once, keyed by its seed.
